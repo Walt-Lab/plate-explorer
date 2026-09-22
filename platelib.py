@@ -22,6 +22,18 @@ import pandas as pd
 
 PLATE_SHAPES = {6: (2, 3), 12: (3, 4), 24: (4, 6), 48: (6, 8), 96: (8, 12), 384: (16, 24)}
 PLOT_TYPES = ["curves", "bar", "box", "heatmap"]
+PALETTE = [
+    "#1f77b4",
+    "#ff7f0e",
+    "#2ca02c",
+    "#d62728",
+    "#9467bd",
+    "#8c564b",
+    "#e377c2",
+    "#7f7f7f",
+    "#bcbd22",
+    "#17becf",
+]
 _WELL_RE = re.compile(r"^([A-Za-z])0*(\d+)$")
 
 
@@ -108,6 +120,74 @@ def layout_from_file(path: str | Path, n_wells: int = 96) -> pd.DataFrame:
     return t
 
 
+def assign_wells(groups: dict, name: str, wells: list[str], color: str | None = None) -> dict:
+    """Return a new groups dict with the selected wells assigned to a named group."""
+    groups = dict(groups)
+    wells = [well_name(*parse_well(w)) for w in wells]
+    if not name or not wells:
+        return groups
+    seen = set()
+    for key, info in list(groups.items()):
+        info = dict(info)
+        kept = [w for w in info.get("wells", []) if w not in wells]
+        if kept:
+            info["wells"] = kept
+            groups[key] = info
+        else:
+            groups.pop(key, None)
+        seen.update(kept)
+    groups[name] = {"wells": sorted(set(wells), key=lambda w: (parse_well(w)[0], parse_well(w)[1])), "color": color or PALETTE[0]}
+    return groups
+
+
+def remove_group(groups: dict, name: str) -> dict:
+    return {k: v for k, v in groups.items() if k != name}
+
+
+def layout_from_groups(groups: dict, n_wells: int = 96) -> pd.DataFrame:
+    """Convert selected groups into a layout DataFrame compatible with `attach_layout`."""
+    rows = []
+    for name, info in groups.items():
+        for well in info.get("wells", []):
+            row, col = parse_well(well)
+            rows.append({"well": well, "row": row, "col": col, "sample": name})
+    if not rows:
+        return pd.DataFrame(columns=["well", "row", "col", "sample", "replicate"])
+    layout = pd.DataFrame(rows)
+    layout["replicate"] = layout.groupby("sample").cumcount() + 1
+    return layout.sort_values(["sample", "well"]).reset_index(drop=True)
+
+
+def plate_table(n_wells: int = 96, groups: dict | None = None) -> pd.DataFrame:
+    """Return a plate-like table with one row per well and assigned group label."""
+    groups = groups or {}
+    nr, nc = plate_shape(n_wells)
+    rows = []
+    for row in range(nr):
+        for col in range(nc):
+            well = well_name(row, col)
+            group = "(unassigned)"
+            for name, info in groups.items():
+                if well in info.get("wells", []):
+                    group = name
+                    break
+            rows.append({"well": well, "row": row, "col": col, "group": group})
+    return pd.DataFrame(rows)
+
+
+def excel_sheet_names(path: str | Path) -> list[str]:
+    """Return available sheet names for Excel inputs, or [] if unavailable."""
+    if not path:
+        return [""]
+    p = Path(path)
+    if not p.exists() or p.suffix.lower() not in {".xlsx", ".xls"}:
+        return [""]
+    try:
+        return pd.ExcelFile(p).sheet_names
+    except Exception:
+        return [""]
+
+
 # --------------------------------------------------------------------------- loading
 def _read_table(src, **kw) -> pd.DataFrame:
     if isinstance(src, pd.DataFrame):
@@ -133,10 +213,56 @@ def _finish(df: pd.DataFrame) -> pd.DataFrame:
 def load_long(src, well="Well", time="Time", value="Value", **kw) -> pd.DataFrame:
     """Long/tidy export: one row per well per read. Set time=None for endpoint data."""
     t = _read_table(src, **kw)
-    ren = {well: "well", value: "value"}
+    columns = {str(c).strip().lower(): c for c in t.columns}
+    well_col = columns.get(str(well).strip().lower(), well)
+    value_col = columns.get(str(value).strip().lower(), value)
+    ren = {well_col: "well", value_col: "value"}
     if time:
-        ren[time] = "time"
+        time_col = columns.get(str(time).strip().lower(), time)
+        ren[time_col] = "time"
     return _finish(t.rename(columns=ren))
+
+
+def load_spectra(src, **kw) -> pd.DataFrame:
+    """Load spectral exports with one well per column and wavelength per row."""
+    if isinstance(src, pd.DataFrame):
+        t = src.copy()
+    elif Path(src).suffix.lower() in {".xlsx", ".xls"}:
+        raw = pd.read_excel(src, header=None, **kw)
+        header_row = next(
+            (
+                i
+                for i, row in raw.iterrows()
+                if sum(_WELL_RE.match(str(value).strip()) is not None for value in row) >= 2
+            ),
+            None,
+        )
+        if header_row is None:
+            return load_long(src, **kw)
+        t = raw.iloc[header_row + 1 :].copy()
+        t.columns = raw.iloc[header_row].tolist()
+    else:
+        t = _read_table(src, **kw)
+
+    well_columns = [c for c in t.columns if _WELL_RE.match(str(c).strip())]
+
+    if not well_columns:
+        return load_long(t, **kw)
+
+    id_columns = [c for c in t.columns if c not in well_columns]
+    time_col = next(
+        (c for c in id_columns if pd.to_numeric(t[c], errors="coerce").notna().any()),
+        id_columns[0] if id_columns else None,
+    )
+    long = t.melt(
+        id_vars=[time_col] if time_col is not None else [],
+        value_vars=well_columns,
+        var_name="well",
+        value_name="value",
+    )
+    if time_col is not None:
+        long = long.rename(columns={time_col: "time"})
+    return _finish(long)
 
 
 def load_wide(src, well="Well", **kw) -> pd.DataFrame:
@@ -158,7 +284,8 @@ def load_matrix(src, **kw) -> pd.DataFrame:
 
 
 def load_data(src, fmt: str = "long", **kw) -> pd.DataFrame:
-    return {"long": load_long, "wide": load_wide, "matrix": load_matrix}[fmt](src, **kw)
+    fmt = (fmt or "long").lower()
+    return {"long": load_long, "spectra": load_spectra, "wide": load_wide, "matrix": load_matrix}[fmt](src, **kw)
 
 
 def attach_layout(data: pd.DataFrame, layout: pd.DataFrame) -> pd.DataFrame:
@@ -198,10 +325,11 @@ def plot_plate_heatmap(df, n_wells=96, time=None, cmap="viridis"):
     return fig
 
 
-def plot_curves(df, facet=False, ncols=3, err="sd"):
+def plot_curves(df, facet=False, ncols=3, err="sd", xlabel="time", colors=None):
     if df["time"].isna().all():
         raise ValueError("No time column in this data - use 'bar', 'box' or 'heatmap'.")
     samples = list(df["sample"].unique())
+    colors = colors or {}
     stats = summarize(df).sort_values("time")
     if facet:
         nc = min(ncols, len(samples))
@@ -211,7 +339,7 @@ def plot_curves(df, facet=False, ncols=3, err="sd"):
             for _, w in df[df["sample"] == s].groupby("well"):
                 ax.plot(w["time"], w["value"], color="gray", alpha=0.4, lw=0.8)
             st = stats[stats["sample"] == s]
-            ax.plot(st["time"], st["mean"], lw=2)
+            ax.plot(st["time"], st["mean"], lw=2, color=colors.get(s))
             ax.set_title(s)
         for ax in list(axes.flat)[len(samples):]:
             ax.axis("off")
@@ -219,23 +347,30 @@ def plot_curves(df, facet=False, ncols=3, err="sd"):
         fig, ax = plt.subplots(figsize=(7, 4.5))
         for s in samples:
             st = stats[stats["sample"] == s]
-            (line,) = ax.plot(st["time"], st["mean"], lw=2, label=s)
-            band = st[err].fillna(0)
-            ax.fill_between(st["time"], st["mean"] - band, st["mean"] + band, color=line.get_color(), alpha=0.2)
-        ax.set_xlabel("time")
+            color = colors.get(s)
+            x = pd.to_numeric(st["time"], errors="coerce").to_numpy(dtype=float)
+            mean = pd.to_numeric(st["mean"], errors="coerce").to_numpy(dtype=float)
+            (line,) = ax.plot(x, mean, lw=2, label=s, color=color)
+            if err:
+                band = pd.to_numeric(st[err], errors="coerce").fillna(0).to_numpy(dtype=float)
+                ax.fill_between(x, mean - band, mean + band, color=line.get_color(), alpha=0.2)
+        ax.set_xlabel(xlabel)
         ax.set_ylabel("value")
         ax.legend()
     fig.tight_layout()
     return fig
 
 
-def plot_bars(df, time=None):
+def plot_bars(df, time=None, colors=None):
     d = endpoint(df, time)
     samples = list(d["sample"].unique())
+    colors = colors or {}
     st = summarize(d, by=("sample",)).set_index("sample").loc[samples]
     fig, ax = plt.subplots(figsize=(1.2 * len(samples) + 2, 4))
     x = np.arange(len(samples))
-    ax.bar(x, st["mean"], yerr=st["sd"].fillna(0), capsize=4, alpha=0.6)
+    for i, s in enumerate(samples):
+        error = st.loc[s, "sd"]
+        ax.bar(i, st.loc[s, "mean"], yerr=0 if pd.isna(error) else error, capsize=4, alpha=0.6, color=colors.get(s))
     rng = np.random.default_rng(0)
     for i, s in enumerate(samples):
         v = d.loc[d["sample"] == s, "value"]
@@ -246,29 +381,32 @@ def plot_bars(df, time=None):
     return fig
 
 
-def plot_box(df, time=None):
+def plot_box(df, time=None, colors=None):
     d = endpoint(df, time)
     samples = list(d["sample"].unique())
+    colors = colors or {}
     fig, ax = plt.subplots(figsize=(1.2 * len(samples) + 2, 4))
-    ax.boxplot([d.loc[d["sample"] == s, "value"] for s in samples])
+    bp = ax.boxplot([d.loc[d["sample"] == s, "value"] for s in samples], patch_artist=True)
+    for patch, s in zip(bp["boxes"], samples):
+        patch.set_facecolor(colors.get(s, patch.get_facecolor()))
     ax.set_xticks(range(1, len(samples) + 1), samples, rotation=30, ha="right")
     ax.set_ylabel("value")
     fig.tight_layout()
     return fig
 
 
-def plot_grouped(df, plot_type="curves", samples=None, facet=False, time=None, err="sd", n_wells=96, ncols=3):
+def plot_grouped(df, plot_type="curves", samples=None, facet=False, time=None, err="sd", n_wells=96, ncols=3, xlabel="time", colors=None):
     """One entry point: filter to `samples`, then draw `plot_type` ('curves','bar','box','heatmap')."""
     if samples:
         df = df[df["sample"].isin(samples)]
     if df.empty:
         raise ValueError("Nothing to plot - check the layout and sample selection.")
     if plot_type == "curves":
-        return plot_curves(df, facet=facet, ncols=ncols, err=err)
+        return plot_curves(df, facet=facet, ncols=ncols, err=err, xlabel=xlabel, colors=colors)
     if plot_type == "bar":
-        return plot_bars(df, time)
+        return plot_bars(df, time, colors=colors)
     if plot_type == "box":
-        return plot_box(df, time)
+        return plot_box(df, time, colors=colors)
     if plot_type == "heatmap":
         return plot_plate_heatmap(df, n_wells, time)
     raise ValueError(f"Unknown plot_type {plot_type!r}; choose from {PLOT_TYPES}")
