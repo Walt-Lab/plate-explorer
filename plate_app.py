@@ -5,11 +5,13 @@ app = marimo.App(width="medium")
 
 @app.cell
 def _():
+    import io
+
     import altair as alt
     import marimo as mo
     import platelib as pl
 
-    return alt, mo, pl
+    return alt, io, mo, pl
 
 
 @app.cell
@@ -27,16 +29,27 @@ def _(mo):
         if f.suffix.lower() in {".csv", ".xlsx", ".xls"}
     )
     source = mo.ui.dropdown(_files, value=_files[0] if _files else None, label="Data file (from the data/ folder)")
+    upload = mo.ui.file(filetypes=[".csv", ".xlsx", ".xls"], label="...or upload a file")
     fmt = mo.ui.dropdown(["spectra", "long", "wide", "matrix"], value="spectra", label="Data format")
     plate = mo.ui.dropdown({"96-well": 96, "384-well": 384}, value="384-well", label="Plate")
     enable_groups = mo.ui.checkbox(label="Enable grouping")
-    mo.vstack([mo.md("# Plate explorer"), source, mo.hstack([fmt, plate, enable_groups], justify="start")])
-    return enable_groups, fmt, plate, source
+    mo.vstack(
+        [
+            mo.md("# Plate explorer"),
+            mo.hstack([source, upload], justify="start"),
+            mo.hstack([fmt, plate, enable_groups], justify="start"),
+        ]
+    )
+    return enable_groups, fmt, plate, source, upload
 
 
 @app.cell
-def _(mo, pl, source):
-    _path = str(mo.notebook_dir() / "data" / source.value) if source.value else ""
+def _(mo, pl, source, upload):
+    if upload.value:
+        _up = upload.value[0]
+        _path = pl.to_readable(_up.name, _up.contents)
+    else:
+        _path = str(mo.notebook_dir() / "data" / source.value) if source.value else ""
     _sheets = pl.excel_sheet_names(_path) if _path else [""]
     sheet = mo.ui.dropdown(_sheets, value=_sheets[0], label="Excel sheet")
     sheet
@@ -44,11 +57,15 @@ def _(mo, pl, source):
 
 
 @app.cell
-def _(fmt, mo, pl, plate, sheet, source):
+def _(fmt, mo, pl, plate, sheet, source, upload):
     # `data` = raw import: a normal pandas DataFrame you can use in any new cell.
-    _path = str(mo.notebook_dir() / "data" / source.value) if source.value else ""
+    if upload.value:
+        _up = upload.value[0]
+        _src = pl.to_readable(_up.name, _up.contents)
+    else:
+        _src = str(mo.notebook_dir() / "data" / source.value) if source.value else ""
     _kw = {"sheet_name": sheet.value} if sheet.value else {}
-    data = pl.load_data(_path, fmt=fmt.value, **_kw) if _path else None
+    data = pl.load_data(_src, fmt=fmt.value, **_kw) if _src else None
     return (data,)
 
 
@@ -56,9 +73,9 @@ def _(fmt, mo, pl, plate, sheet, source):
 def _(enable_groups, get_groups, mo, pl):
     # Name/colour boxes for the next group; they advance automatically after each "Add".
     _n = len(get_groups())
-    _colors = list(pl.PALETTE)
+    _names = list(pl.COLOR_CHOICES)
     group_name = mo.ui.text(value=f"Group {_n + 1}", label="Group name")
-    group_color = mo.ui.dropdown(pl.PALETTE, value=_colors[_n % len(_colors)], label="Color")
+    group_color = mo.ui.dropdown(pl.COLOR_CHOICES, value=_names[_n % len(_names)], label="Color")
     group_wells = mo.ui.text(value="", label="Wells (e.g. A1-A5)")
     if enable_groups.value:
         mo.hstack([group_name, group_wells, group_color], justify="start")
@@ -66,22 +83,33 @@ def _(enable_groups, get_groups, mo, pl):
 
 
 @app.cell
-def _(alt, enable_groups, get_groups, mo, pl, plate):
-    # The virtual plate. Click or drag over wells to select them. Coloured = already in a group.
+def _(alt, data, enable_groups, get_groups, mo, pl, plate):
+    # The virtual plate. Click or drag over wells to select them.
+    # Fill color = each well's signal (heatmap, from the loaded data).
+    # Ring color = group assignment. Dimmed = not currently selected.
     _groups = get_groups()
     _table = pl.plate_table(plate.value, _groups).copy()
     _table["col"] = _table["col"].astype(int) + 1
     _table["row"] = _table["row"].astype(int) + 1
     _table["row_label"] = [chr(64 + int(r)) for r in _table["row"]]
+
+    if data is not None and not data.empty:
+        _times = data["time"].dropna()
+        _endpoint = data[data["time"] == _times.max()] if not _times.empty else data
+        _vals = _endpoint.groupby("well", as_index=False)["value"].mean()
+        _table = _table.merge(_vals, on="well", how="left")
+    else:
+        _table["value"] = float("nan")
+
     _nr, _nc = pl.plate_shape(plate.value)
     _cell = 34 if _nr <= 8 else 26
     _size = 700 if _nr <= 8 else 400
     _domain = ["(unassigned)"] + list(_groups)
-    _range = ["#e6e6e6"] + [g["color"] for g in _groups.values()]
+    _range = ["#bbbbbb"] + [g["color"] for g in _groups.values()]
     _selection = alt.selection_point(fields=["well"], empty="all")
     _chart = (
         alt.Chart(_table)
-        .mark_circle(size=_size, stroke="#888", strokeWidth=0.5)
+        .mark_circle(size=_size)
         .encode(
             x=alt.X(
                 "col:Q",
@@ -96,13 +124,20 @@ def _(alt, enable_groups, get_groups, mo, pl, plate):
                 scale=alt.Scale(domain=list(chr(65 + i) for i in range(_nr)), nice=False),
                 axis=alt.Axis(grid=False, ticks=False),
             ),
-            color=alt.condition(
-                _selection,
-                alt.Color("group:N", scale=alt.Scale(domain=_domain, range=_range), legend=alt.Legend(title="Groups")),
-                alt.value("#e6e6e6"),
+            color=alt.Color(
+                "value:Q",
+                title="Signal",
+                scale=alt.Scale(scheme="viridis"),
+                legend=alt.Legend(title="Signal"),
             ),
-            strokeWidth=alt.condition(_selection, alt.value(2), alt.value(0.5)),
-            tooltip=["well", "group"],
+            stroke=alt.Stroke(
+                "group:N",
+                scale=alt.Scale(domain=_domain, range=_range),
+                legend=alt.Legend(title="Group"),
+            ),
+            strokeWidth=alt.condition(_selection, alt.value(3), alt.value(1)),
+            opacity=alt.condition(_selection, alt.value(1.0), alt.value(0.35)),
+            tooltip=["well", "group", "value"],
         )
         .add_params(_selection)
         .properties(width=_nc * _cell, height=_nr * _cell)
