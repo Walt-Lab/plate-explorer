@@ -34,6 +34,19 @@ PALETTE = [
     "#bcbd22",
     "#17becf",
 ]
+# Same colors as PALETTE, with human-readable names for UI dropdowns.
+COLOR_CHOICES = {
+    "Blue": "#1f77b4",
+    "Orange": "#ff7f0e",
+    "Green": "#2ca02c",
+    "Red": "#d62728",
+    "Purple": "#9467bd",
+    "Brown": "#8c564b",
+    "Pink": "#e377c2",
+    "Gray": "#7f7f7f",
+    "Olive": "#bcbd22",
+    "Teal": "#17becf",
+}
 _WELL_RE = re.compile(r"^([A-Za-z])0*(\d+)$")
 
 
