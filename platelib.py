@@ -139,6 +139,8 @@ def assign_wells(groups: dict, name: str, wells: list[str], color: str | None = 
     wells = [well_name(*parse_well(w)) for w in wells]
     if not name or not wells:
         return groups
+    # Keep notes already saved under this name (the loop below can drop the group first).
+    notes = groups.get(name, {}).get("notes", "")
     seen = set()
     for key, info in list(groups.items()):
         info = dict(info)
@@ -149,12 +151,43 @@ def assign_wells(groups: dict, name: str, wells: list[str], color: str | None = 
         else:
             groups.pop(key, None)
         seen.update(kept)
-    groups[name] = {"wells": sorted(set(wells), key=lambda w: (parse_well(w)[0], parse_well(w)[1])), "color": color or PALETTE[0]}
+    groups[name] = {
+        "wells": sorted(set(wells), key=lambda w: (parse_well(w)[0], parse_well(w)[1])),
+        "color": color or PALETTE[0],
+        "notes": notes,
+    }
     return groups
 
 
 def remove_group(groups: dict, name: str) -> dict:
     return {k: v for k, v in groups.items() if k != name}
+
+
+def apply_group_edits(groups: dict, edits: list) -> dict:
+    """Rename groups and set their notes. `edits` is [(old_name, new_name, notes), ...].
+
+    Wells and colors are kept. A blank new name keeps the old one, and a rename that would
+    collide with another group's name is ignored (so no group is ever overwritten).
+    """
+    from collections import Counter
+
+    notes = {old: (n or "") for old, _new, n in edits}
+    names = {old: ((new or "").strip() or old) for old, new, _n in edits}
+    names = {old: names.get(old, old) for old in groups}
+    for _ in range(len(names) + 1):
+        counts = Counter(names.values())
+        clash = [old for old, new in names.items() if new != old and counts[new] > 1]
+        if not clash:
+            break
+        for old in clash:
+            names[old] = old
+    out = {}
+    for old, info in groups.items():
+        info = dict(info)
+        if old in notes:
+            info["notes"] = notes[old]
+        out[names[old]] = info
+    return out
 
 
 def layout_from_groups(groups: dict, n_wells: int = 96) -> pd.DataFrame:
@@ -188,27 +221,48 @@ def plate_table(n_wells: int = 96, groups: dict | None = None) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
-def excel_sheet_names(path: str | Path) -> list[str]:
+def to_readable(name: str, contents: bytes):
+    """Wrap uploaded file bytes as a file-like object the loaders can read (keeps the extension)."""
+    import io
+
+    buf = io.BytesIO(contents)
+    buf.name = name
+    return buf
+
+
+def excel_sheet_names(path) -> list[str]:
     """Return available sheet names for Excel inputs, or [] if unavailable."""
     if not path:
         return [""]
-    p = Path(path)
-    if not p.exists() or p.suffix.lower() not in {".xlsx", ".xls"}:
-        return [""]
+    if isinstance(path, (str, Path)):
+        p = Path(path)
+        if not p.exists() or p.suffix.lower() not in {".xlsx", ".xls"}:
+            return [""]
+        src = p
+    else:
+        name = getattr(path, "name", "")
+        if Path(str(name)).suffix.lower() not in {".xlsx", ".xls"}:
+            return [""]
+        src = path
     try:
-        return pd.ExcelFile(p).sheet_names
+        return pd.ExcelFile(src).sheet_names
     except Exception:
         return [""]
 
 
 # --------------------------------------------------------------------------- loading
+def _suffix_of(src) -> str:
+    """File extension for a path/Path, or for a file-like object carrying a .name."""
+    name = src if isinstance(src, (str, Path)) else getattr(src, "name", "")
+    return Path(str(name)).suffix.lower()
+
+
 def _read_table(src, **kw) -> pd.DataFrame:
     if isinstance(src, pd.DataFrame):
         return src.copy()
-    p = Path(src)
-    if p.suffix.lower() in {".xlsx", ".xls"}:
-        return pd.read_excel(p, **kw)
-    return pd.read_csv(p, **kw)
+    if _suffix_of(src) in {".xlsx", ".xls"}:
+        return pd.read_excel(src, **kw)
+    return pd.read_csv(src, **kw)
 
 
 def _finish(df: pd.DataFrame) -> pd.DataFrame:
@@ -240,7 +294,7 @@ def load_spectra(src, **kw) -> pd.DataFrame:
     """Load spectral exports with one well per column and wavelength per row."""
     if isinstance(src, pd.DataFrame):
         t = src.copy()
-    elif Path(src).suffix.lower() in {".xlsx", ".xls"}:
+    elif _suffix_of(src) in {".xlsx", ".xls"}:
         raw = pd.read_excel(src, header=None, **kw)
         header_row = next(
             (

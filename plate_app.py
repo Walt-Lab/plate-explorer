@@ -33,14 +33,15 @@ def _(mo):
     fmt = mo.ui.dropdown(["spectra", "long", "wide", "matrix"], value="spectra", label="Data format")
     plate = mo.ui.dropdown({"96-well": 96, "384-well": 384}, value="384-well", label="Plate")
     enable_groups = mo.ui.checkbox(label="Enable grouping")
+    enable_map = mo.ui.checkbox(label="Grouping map & notes")
     mo.vstack(
         [
             mo.md("# Plate explorer"),
             mo.hstack([source, upload], justify="start"),
-            mo.hstack([fmt, plate, enable_groups], justify="start"),
+            mo.hstack([fmt, plate, enable_groups, enable_map], justify="start"),
         ]
     )
-    return enable_groups, fmt, plate, source, upload
+    return enable_groups, enable_map, fmt, plate, source, upload
 
 
 @app.cell
@@ -255,6 +256,202 @@ def _(df, fmt, get_groups, pl, plate, plot_type):
     )
     fig
     return (fig,)
+
+
+# ---------------------------------------------------------------------------
+# Grouping map & notes: a separate virtual plate for planning/documenting which
+# samples are in which wells. It uses NO data and does not touch the groups above.
+# ---------------------------------------------------------------------------
+@app.cell
+def _(mo):
+    # {name: {"wells": [...], "color": "#RRGGBB", "notes": "..."}}
+    get_map, set_map = mo.state({})
+    # Whether the labels & notes panel is open.
+    get_notes_open, set_notes_open = mo.state(False)
+    return get_map, get_notes_open, set_map, set_notes_open
+
+
+@app.cell
+def _(get_map, mo, pl):
+    # Name/colour/wells boxes for the next map group; they advance after each "Add".
+    _n = len(get_map())
+    _names = list(pl.COLOR_CHOICES)
+    map_name = mo.ui.text(value=f"Group {_n + 1}", label="Group name")
+    map_color = mo.ui.dropdown(pl.COLOR_CHOICES, value=_names[_n % len(_names)], label="Color")
+    map_wells = mo.ui.text(value="", label="Wells (e.g. A1-A5)")
+    return map_color, map_name, map_wells
+
+
+@app.cell
+def _(alt, enable_map, get_map, mo, pl, plate):
+    # The grouping map: same plate layout and click/drag selection as the plot picker,
+    # but each well is filled with its group color (no signal values).
+    _groups = get_map()
+    _table = pl.plate_table(plate.value, _groups).copy()
+    _table["col"] = _table["col"].astype(int) + 1
+    _table["row"] = _table["row"].astype(int) + 1
+    _table["row_label"] = [chr(64 + int(r)) for r in _table["row"]]
+
+    _nr, _nc = pl.plate_shape(plate.value)
+    _cell = 34 if _nr <= 8 else 26
+    _size = 700 if _nr <= 8 else 400
+    _domain = ["(unassigned)"] + list(_groups)
+    _range = ["#eeeeee"] + [g["color"] for g in _groups.values()]
+    _selection = alt.selection_point(fields=["well"], empty="all")
+    _chart = (
+        alt.Chart(_table)
+        .mark_circle(size=_size, stroke="#888888")
+        .encode(
+            x=alt.X(
+                "col:Q",
+                title=None,
+                scale=alt.Scale(domain=[0.5, _nc + 0.5], nice=False, zero=False),
+                axis=alt.Axis(values=list(range(1, _nc + 1)), orient="top", grid=False, ticks=False),
+            ),
+            y=alt.Y(
+                "row_label:N",
+                title=None,
+                sort=list(chr(65 + i) for i in range(_nr)),
+                scale=alt.Scale(domain=list(chr(65 + i) for i in range(_nr)), nice=False),
+                axis=alt.Axis(grid=False, ticks=False),
+            ),
+            color=alt.Color(
+                "group:N",
+                scale=alt.Scale(domain=_domain, range=_range),
+                legend=alt.Legend(title="Group"),
+            ),
+            strokeWidth=alt.condition(_selection, alt.value(3), alt.value(1)),
+            opacity=alt.condition(_selection, alt.value(1.0), alt.value(0.35)),
+            tooltip=["well", "group"],
+        )
+        .add_params(_selection)
+        .properties(width=_nc * _cell, height=_nr * _cell)
+    )
+    map_picker = mo.ui.altair_chart(_chart, chart_selection="point", legend_selection=False)
+    (
+        mo.vstack([mo.md("## Grouping map & notes"), map_picker])
+        if enable_map.value
+        else mo.md("")
+    )
+    return (map_picker,)
+
+
+@app.cell
+def _(enable_map, get_map, map_color, map_name, map_picker, map_wells, mo, pl, plate, set_map):
+    # Add wells to a group (from the wells you select on the map, or typed ranges), remove groups.
+    _sel = map_picker.value
+    _wells = []
+
+    if _sel is None:
+        _wells = []
+    elif hasattr(_sel, "to_dict") and hasattr(_sel, "empty"):
+        _records = _sel.to_dict("records") if not _sel.empty else []
+        _wells = [row.get("well") for row in _records if row.get("well") is not None]
+    elif isinstance(_sel, dict):
+        _wells = _sel.get("well", []) if isinstance(_sel.get("well", []), list) else [_sel.get("well")]
+        _wells = [w for w in _wells if w is not None]
+    elif isinstance(_sel, list):
+        _wells = [r["well"] for r in _sel if isinstance(r, dict) and "well" in r]
+
+    _wells = list(dict.fromkeys(_wells))
+    if len(_wells) == len(pl.all_wells(plate.value)):
+        _wells = []
+
+    _well_error = ""
+    if map_wells.value.strip():
+        try:
+            _wells = pl.expand_wells(map_wells.value, plate.value)
+        except ValueError as exc:
+            _wells = []
+            _well_error = str(exc)
+
+    def _add(_):
+        _name = map_name.value.strip()
+        if _wells and _name:
+            set_map(lambda g: pl.assign_wells(g, _name, _wells, map_color.value))
+
+    _add_button = mo.ui.button(label="Add selected wells to group", kind="success", on_click=_add)
+    _clear_button = mo.ui.button(label="Clear all groups", on_click=lambda v: set_map({}))
+
+    _rows = []
+    for _gname, _g in get_map().items():
+        _rm = mo.ui.button(label="Remove", on_click=lambda v, n=_gname: set_map(lambda g: pl.remove_group(g, n)))
+        _rows.append(
+            mo.hstack(
+                [mo.md(f"<span style='color:{_g['color']}'>&#9679;</span> **{_gname}**, {len(_g['wells'])} wells"), _rm],
+                justify="start",
+                align="center",
+            )
+        )
+
+    if enable_map.value:
+        _map_ui = mo.vstack(
+            [
+                mo.md(f"**Invalid wells:** {_well_error}") if _well_error else mo.md(""),
+                mo.hstack([map_name, map_wells, map_color, _add_button], justify="start", align="end"),
+                *_rows,
+                _clear_button if _rows else mo.md(""),
+            ]
+        )
+    else:
+        _map_ui = mo.md("")
+
+    _map_ui
+    return
+
+
+@app.cell
+def _(enable_map, get_map, get_notes_open, mo, pl, set_map, set_notes_open):
+    # Button that opens/closes the labels & notes panel. Inside: one label + notes box per group.
+    _groups = get_map()
+    _open = get_notes_open()
+    _toggle = mo.ui.button(
+        label="Hide labels & notes" if _open else "View / edit labels & notes",
+        on_click=lambda v: set_notes_open(lambda o: not o),
+    )
+
+    if not enable_map.value:
+        _panel = mo.md("")
+    elif not _open:
+        _panel = _toggle
+    elif not _groups:
+        _panel = mo.vstack([_toggle, mo.md("_No groups yet. Add one above first._")])
+    else:
+        _olds = list(_groups)
+        _labels = mo.ui.array([mo.ui.text(value=_o, label="Label") for _o in _olds])
+        _notes = mo.ui.array(
+            [
+                mo.ui.text_area(value=_g.get("notes", ""), label="Notes", rows=3, full_width=True)
+                for _g in _groups.values()
+            ]
+        )
+
+        def _save(_):
+            set_map(lambda g: pl.apply_group_edits(g, list(zip(_olds, _labels.value, _notes.value))))
+
+        _blocks = []
+        for _i, _g in enumerate(_groups.values()):
+            _blocks.append(
+                mo.vstack(
+                    [
+                        mo.hstack(
+                            [
+                                mo.md(f"<span style='color:{_g['color']};font-size:1.4em'>&#9679;</span> {len(_g['wells'])} wells"),
+                                _labels[_i],
+                            ],
+                            justify="start",
+                            align="end",
+                        ),
+                        _notes[_i],
+                    ]
+                )
+            )
+        _panel = mo.vstack(
+            [_toggle, *_blocks, mo.ui.button(label="Save labels & notes", kind="success", on_click=_save)]
+        )
+
+    _panel
+    return
 
 
 if __name__ == "__main__":
