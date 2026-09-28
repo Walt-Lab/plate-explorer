@@ -261,36 +261,45 @@ def _(df, fmt, get_groups, pl, plate, plot_type):
 # ---------------------------------------------------------------------------
 # Grouping map & notes: a separate virtual plate for planning/documenting which
 # samples are in which wells. It uses NO data and does not touch the groups above.
+# The group name is the label. Notes are optional and can be typed when the group is
+# created, or added/changed later by clicking any well of the group.
 # ---------------------------------------------------------------------------
 @app.cell
 def _(mo):
-    # {name: {"wells": [...], "color": "#RRGGBB", "notes": "..."}}
-    get_map, set_map = mo.state({})
-    # Whether the labels & notes panel is open.
-    get_notes_open, set_notes_open = mo.state(False)
-    return get_map, get_notes_open, set_map, set_notes_open
+    # {name: {"wells": [...], "color": "#RRGGBB"}}
+    get_map, set_map = mo.state({}, allow_self_loops=True)
+    return get_map, set_map
 
 
 @app.cell
-def _(get_map, mo, pl):
-    # Name/colour/wells boxes for the next map group; they advance after each "Add".
-    _n = len(get_map())
-    _names = list(pl.COLOR_CHOICES)
-    map_name = mo.ui.text(value=f"Group {_n + 1}", label="Group name")
-    map_color = mo.ui.dropdown(pl.COLOR_CHOICES, value=_names[_n % len(_names)], label="Color")
-    map_wells = mo.ui.text(value="", label="Wells (e.g. A1-A5)")
-    return map_color, map_name, map_wells
+def _():
+    # {group name: notes text}. A plain dict on purpose: typing a note never redraws the
+    # plate or the forms, so nothing you typed can be wiped out when something else changes.
+    notes_store = {}
+    # Scratch space shared between cells (also a plain dict, so writing to it redraws nothing):
+    #   "wells": wells the next "Add" will use   "error": problem with typed wells, if any
+    #   "boxes": the notes box currently open for the clicked group
+    pending = {"wells": [], "error": "", "boxes": {}}
+    return notes_store, pending
 
 
 @app.cell
-def _(alt, enable_map, get_map, mo, pl, plate):
+def _(mo):
+    get_msg, set_msg = mo.state("", allow_self_loops=True)  # feedback line next to the Add button
+    return get_msg, set_msg
+
+
+@app.cell
+def _(alt, enable_map, get_map, mo, notes_store, pl, plate):
     # The grouping map: same plate layout and click/drag selection as the plot picker,
     # but each well is filled with its group color (no signal values).
+    # Hover over a well to see its group and that group's notes.
     _groups = get_map()
     _table = pl.plate_table(plate.value, _groups).copy()
     _table["col"] = _table["col"].astype(int) + 1
     _table["row"] = _table["row"].astype(int) + 1
     _table["row_label"] = [chr(64 + int(r)) for r in _table["row"]]
+    _table["notes"] = _table["group"].map({k: notes_store.get(k, "") for k in _groups}).fillna("")
 
     _nr, _nc = pl.plate_shape(plate.value)
     _cell = 34 if _nr <= 8 else 26
@@ -322,7 +331,7 @@ def _(alt, enable_map, get_map, mo, pl, plate):
             ),
             strokeWidth=alt.condition(_selection, alt.value(3), alt.value(1)),
             opacity=alt.condition(_selection, alt.value(1.0), alt.value(0.35)),
-            tooltip=["well", "group"],
+            tooltip=["well", "group", alt.Tooltip("notes:N", title="Notes")],
         )
         .add_params(_selection)
         .properties(width=_nc * _cell, height=_nr * _cell)
@@ -337,11 +346,10 @@ def _(alt, enable_map, get_map, mo, pl, plate):
 
 
 @app.cell
-def _(enable_map, get_map, map_color, map_name, map_picker, map_wells, mo, pl, plate, set_map):
-    # Add wells to a group (from the wells you select on the map, or typed ranges), remove groups.
+def _(map_picker, pl, plate):
+    # Wells currently selected on the map by clicking/dragging (empty if nothing is selected).
     _sel = map_picker.value
     _wells = []
-
     if _sel is None:
         _wells = []
     elif hasattr(_sel, "to_dict") and hasattr(_sel, "empty"):
@@ -352,43 +360,173 @@ def _(enable_map, get_map, map_color, map_name, map_picker, map_wells, mo, pl, p
         _wells = [w for w in _wells if w is not None]
     elif isinstance(_sel, list):
         _wells = [r["well"] for r in _sel if isinstance(r, dict) and "well" in r]
-
     _wells = list(dict.fromkeys(_wells))
+    # "Everything selected" just means nothing is selected.
     if len(_wells) == len(pl.all_wells(plate.value)):
         _wells = []
+    map_selected = _wells
+    return (map_selected,)
 
-    _well_error = ""
+
+@app.cell
+def _(get_map, map_selected):
+    # The group you clicked on: set only when every selected well belongs to the same group.
+    _groups = get_map()
+    _owners = {next((n for n, g in _groups.items() if w in g["wells"]), None) for w in map_selected}
+    active_group = next(iter(_owners)) if len(_owners) == 1 and None not in _owners else None
+    return (active_group,)
+
+
+@app.cell
+def _(active_group, enable_map, get_map, mo, notes_store, pending, set_map, set_msg):
+    # Click a group on the map -> a box opens here with that group's notes, ready to edit.
+    # Notes also save themselves when you click out of the box.
+    import html as _html
+
+    pending["boxes"] = {}
+    _g = get_map().get(active_group) if active_group else None
+    if enable_map.value and _g is not None:
+        _name = active_group
+        _box = mo.ui.text_area(
+            value=notes_store.get(_name, ""),
+            rows=5,
+            full_width=True,
+            label="Notes",
+            placeholder="Type notes for this group...",
+            on_change=lambda v: notes_store.__setitem__(_name, (v or "").strip()),
+        )
+        pending["boxes"] = {_name: _box}  # lets the Add button save this box too
+
+        def _save(_):
+            notes_store[_name] = (_box.value or "").strip()
+            set_msg(f"Saved notes for \u201c{_name}\u201d \u2713")
+            set_map(lambda g: dict(g))  # redraw so the hover text on the plate is up to date
+
+        _save_btn = mo.ui.button(label="Save notes", kind="success", on_click=_save)
+        _head = mo.Html(
+            f"<span style='color:{_g['color']}'>&#9679;</span> <b>{_html.escape(_name)}</b>"
+            f" &nbsp;&middot;&nbsp; {len(_g['wells'])} wells"
+        )
+        _panel = mo.callout(mo.vstack([_head, _box, _save_btn]), kind="neutral")
+    else:
+        _panel = mo.md("")
+    _panel
+    return
+
+
+@app.cell
+def _(enable_map, get_map, mo, pl):
+    # The form for the next group: name, wells, color, notes. It is rebuilt (so it comes back
+    # empty, with the next default name/color) every time a group is added or removed.
+    _n = len(get_map())
+    _names = list(pl.COLOR_CHOICES)
+    map_name = mo.ui.text(value=f"Group {_n + 1}", label="Group name")
+    map_color = mo.ui.dropdown(pl.COLOR_CHOICES, value=_names[_n % len(_names)], label="Color")
+    map_wells = mo.ui.text(value="", label="Wells (e.g. A1-A5)")
+    map_notes = mo.ui.text_area(value="", label="Notes", rows=3, full_width=True)
+    # The Add button reads these through this dict, so typing in a box never rebuilds the button.
+    map_inputs = {"name": map_name, "color": map_color, "notes": map_notes}
+    (
+        mo.vstack(
+            [
+                mo.hstack([map_name, map_wells, map_color], justify="start", align="end"),
+                map_notes,
+            ]
+        )
+        if enable_map.value
+        else mo.md("")
+    )
+    return map_color, map_inputs, map_name, map_notes, map_wells
+
+
+@app.cell
+def _(enable_map, map_selected, map_wells, mo, pending, pl, plate):
+    # Live hint under the notes box. Also works out which wells the Add button will use:
+    # a range typed in "Wells" wins, otherwise whatever is selected on the plate.
+    _wells = list(map_selected)
+    _err = ""
     if map_wells.value.strip():
         try:
             _wells = pl.expand_wells(map_wells.value, plate.value)
         except ValueError as exc:
             _wells = []
-            _well_error = str(exc)
+            _err = str(exc)
+    pending["wells"] = _wells
+    pending["error"] = _err
+
+    if _err:
+        _hint = mo.md(f"**Invalid wells:** {_err}")
+    elif _wells:
+        _hint = mo.md(f"**{len(_wells)} wells** ready to add. Press the green button to put them in a group.")
+    else:
+        _hint = mo.md("")
+    _hint if enable_map.value else mo.md("")
+    return
+
+
+@app.cell
+def _(enable_map, get_map, get_msg, map_inputs, mo, notes_store, pending, pl, set_map, set_msg):
+    # The Add button (bottom of the form) and the list of groups made so far.
+    import html as _html
+
+    _groups_now = get_map()
 
     def _add(_):
-        _name = map_name.value.strip()
-        if _wells and _name:
-            set_map(lambda g: pl.assign_wells(g, _name, _wells, map_color.value))
+        _name = map_inputs["name"].value.strip()
+        _note = map_inputs["notes"].value.strip()
+        _color = map_inputs["color"].value
+        _wells = list(pending["wells"])
+        if pending["error"]:
+            set_msg(f"Couldn't add: {pending['error']}")
+            return
+        if not _name:
+            set_msg("Give the group a name first.")
+            return
+        try:
+            if _wells:
+                # Save everything: notes from the open notes box (if any), then the new group.
+                for _n, _b in pending["boxes"].items():
+                    if _n in _groups_now:
+                        notes_store[_n] = (_b.value or "").strip()
+                if _note:  # a blank box keeps any notes the group already has
+                    notes_store[_name] = _note
+                set_map(lambda g: pl.assign_wells(g, _name, _wells, _color))
+                set_msg(f"Added {len(_wells)} wells to \u201c{_name}\u201d \u2713")
+            elif _note and _name in _groups_now:
+                # No wells chosen: just save the notes onto the existing group with this name.
+                notes_store[_name] = _note
+                set_map(lambda g: dict(g))
+                set_msg(f"Saved notes for \u201c{_name}\u201d \u2713")
+            else:
+                set_msg("Pick some wells first: click or drag on the plate, or type a range like A1-A5.")
+        except Exception as exc:  # show the problem instead of failing silently
+            set_msg(f"Couldn't add: {exc}")
 
     _add_button = mo.ui.button(label="Add selected wells to group", kind="success", on_click=_add)
-    _clear_button = mo.ui.button(label="Clear all groups", on_click=lambda v: set_map({}))
+    _clear_button = mo.ui.button(
+        label="Clear all groups",
+        on_click=lambda v: (notes_store.clear(), set_msg(""), set_map({})),
+    )
 
     _rows = []
-    for _gname, _g in get_map().items():
-        _rm = mo.ui.button(label="Remove", on_click=lambda v, n=_gname: set_map(lambda g: pl.remove_group(g, n)))
-        _rows.append(
-            mo.hstack(
-                [mo.md(f"<span style='color:{_g['color']}'>&#9679;</span> **{_gname}**, {len(_g['wells'])} wells"), _rm],
-                justify="start",
-                align="center",
-            )
+    for _gname, _g in _groups_now.items():
+        _rm = mo.ui.button(
+            label="Remove",
+            on_click=lambda v, n=_gname: (notes_store.pop(n, None), set_map(lambda g: pl.remove_group(g, n))),
         )
+        _note_txt = notes_store.get(_gname, "")
+        # Hovering over the group name shows its notes (browser tooltip).
+        _label = (
+            f"<span title=\"{_html.escape(_note_txt, quote=True)}\">"
+            f"<span style='color:{_g['color']}'>&#9679;</span> <b>{_html.escape(_gname)}</b>, "
+            f"{len(_g['wells'])} wells{' &#128221;' if _note_txt else ''}</span>"
+        )
+        _rows.append(mo.hstack([mo.md(_label), _rm], justify="start", align="center"))
 
     if enable_map.value:
         _map_ui = mo.vstack(
             [
-                mo.md(f"**Invalid wells:** {_well_error}") if _well_error else mo.md(""),
-                mo.hstack([map_name, map_wells, map_color, _add_button], justify="start", align="end"),
+                mo.hstack([_add_button, mo.md(get_msg())], justify="start", align="center"),
                 *_rows,
                 _clear_button if _rows else mo.md(""),
             ]
@@ -397,60 +535,6 @@ def _(enable_map, get_map, map_color, map_name, map_picker, map_wells, mo, pl, p
         _map_ui = mo.md("")
 
     _map_ui
-    return
-
-
-@app.cell
-def _(enable_map, get_map, get_notes_open, mo, pl, set_map, set_notes_open):
-    # Button that opens/closes the labels & notes panel. Inside: one label + notes box per group.
-    _groups = get_map()
-    _open = get_notes_open()
-    _toggle = mo.ui.button(
-        label="Hide labels & notes" if _open else "View / edit labels & notes",
-        on_click=lambda v: set_notes_open(lambda o: not o),
-    )
-
-    if not enable_map.value:
-        _panel = mo.md("")
-    elif not _open:
-        _panel = _toggle
-    elif not _groups:
-        _panel = mo.vstack([_toggle, mo.md("_No groups yet. Add one above first._")])
-    else:
-        _olds = list(_groups)
-        _labels = mo.ui.array([mo.ui.text(value=_o, label="Label") for _o in _olds])
-        _notes = mo.ui.array(
-            [
-                mo.ui.text_area(value=_g.get("notes", ""), label="Notes", rows=3, full_width=True)
-                for _g in _groups.values()
-            ]
-        )
-
-        def _save(_):
-            set_map(lambda g: pl.apply_group_edits(g, list(zip(_olds, _labels.value, _notes.value))))
-
-        _blocks = []
-        for _i, _g in enumerate(_groups.values()):
-            _blocks.append(
-                mo.vstack(
-                    [
-                        mo.hstack(
-                            [
-                                mo.md(f"<span style='color:{_g['color']};font-size:1.4em'>&#9679;</span> {len(_g['wells'])} wells"),
-                                _labels[_i],
-                            ],
-                            justify="start",
-                            align="end",
-                        ),
-                        _notes[_i],
-                    ]
-                )
-            )
-        _panel = mo.vstack(
-            [_toggle, *_blocks, mo.ui.button(label="Save labels & notes", kind="success", on_click=_save)]
-        )
-
-    _panel
     return
 
 
