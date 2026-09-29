@@ -14,6 +14,28 @@ def _():
     return alt, io, mo, pl
 
 
+# ---------------------------------------------------------------------------
+# Page switcher. The three "apps" below are shown one at a time: only the cells
+# in the "Pages" section at the bottom draw anything, and each one checks which button
+# is selected here. Everything else in the file just builds pieces and draws nothing.
+# ---------------------------------------------------------------------------
+@app.cell
+def _(mo):
+    HOME = "Home page"
+    GROUPING = "Grouping-based spectra"
+    MAPNOTES = "Grouping map & notes"
+    nav = mo.ui.tabs({HOME: mo.md(""), GROUPING: mo.md(""), MAPNOTES: mo.md("")})
+    mo.vstack([mo.md("# Plate explorer"), nav])
+    return GROUPING, HOME, MAPNOTES, nav
+
+
+@app.cell
+def _(GROUPING, HOME, MAPNOTES, nav):
+    # Name of the page whose button is selected (falls back to the Home page).
+    page = nav.value if nav.value in (HOME, GROUPING, MAPNOTES) else HOME
+    return (page,)
+
+
 @app.cell
 def _(mo):
     # Holds the well groups you build on the plate: {name: {"wells": [...], "color": "#RRGGBB"}}
@@ -32,16 +54,13 @@ def _(mo):
     upload = mo.ui.file(filetypes=[".csv", ".xlsx", ".xls"], label="...or upload a file")
     fmt = mo.ui.dropdown(["spectra", "long", "wide", "matrix"], value="spectra", label="Data format")
     plate = mo.ui.dropdown({"96-well": 96, "384-well": 384}, value="384-well", label="Plate")
-    enable_groups = mo.ui.checkbox(label="Enable grouping")
-    enable_map = mo.ui.checkbox(label="Grouping map & notes")
-    mo.vstack(
+    home_controls = mo.vstack(
         [
-            mo.md("# Plate explorer"),
             mo.hstack([source, upload], justify="start"),
-            mo.hstack([fmt, plate, enable_groups, enable_map], justify="start"),
+            mo.hstack([fmt, plate], justify="start"),
         ]
     )
-    return enable_groups, enable_map, fmt, plate, source, upload
+    return fmt, home_controls, plate, source, upload
 
 
 @app.cell
@@ -53,12 +72,12 @@ def _(mo, pl, source, upload):
         _path = str(mo.notebook_dir() / "data" / source.value) if source.value else ""
     _sheets = pl.excel_sheet_names(_path) if _path else [""]
     sheet = mo.ui.dropdown(_sheets, value=_sheets[0], label="Excel sheet")
-    sheet
-    return (sheet,)
+    sheet_view = mo.hstack([sheet], justify="start")
+    return sheet, sheet_view
 
 
 @app.cell
-def _(fmt, mo, pl, plate, sheet, source, upload):
+def _(fmt, mo, pl, sheet, source, upload):
     # `data` = raw import: a normal pandas DataFrame you can use in any new cell.
     if upload.value:
         _up = upload.value[0]
@@ -66,25 +85,28 @@ def _(fmt, mo, pl, plate, sheet, source, upload):
     else:
         _src = str(mo.notebook_dir() / "data" / source.value) if source.value else ""
     _kw = {"sheet_name": sheet.value} if sheet.value else {}
-    data = pl.load_data(_src, fmt=fmt.value, **_kw) if _src else None
-    return (data,)
+    try:
+        data = pl.load_data(_src, fmt=fmt.value, **_kw) if _src else None
+        data_error = ""
+    except Exception as exc:  # show the problem on the Home page instead of blanking every page
+        data = None
+        data_error = str(exc)
+    return data, data_error
 
 
 @app.cell
-def _(enable_groups, get_groups, mo, pl):
+def _(get_groups, mo, pl):
     # Name/colour boxes for the next group; they advance automatically after each "Add".
     _n = len(get_groups())
     _names = list(pl.COLOR_CHOICES)
     group_name = mo.ui.text(value=f"Group {_n + 1}", label="Group name")
     group_color = mo.ui.dropdown(pl.COLOR_CHOICES, value=_names[_n % len(_names)], label="Color")
     group_wells = mo.ui.text(value="", label="Wells (e.g. A1-A5)")
-    if enable_groups.value:
-        mo.hstack([group_name, group_wells, group_color], justify="start")
     return group_color, group_name, group_wells
 
 
 @app.cell
-def _(alt, data, enable_groups, get_groups, mo, pl, plate):
+def _(alt, data, get_groups, mo, pl, plate):
     # The virtual plate. Click or drag over wells to select them.
     # Fill color = each well's signal (heatmap, from the loaded data).
     # Ring color = group assignment. Dimmed = not currently selected.
@@ -144,12 +166,13 @@ def _(alt, data, enable_groups, get_groups, mo, pl, plate):
         .properties(width=_nc * _cell, height=_nr * _cell)
     )
     picker = mo.ui.altair_chart(_chart, chart_selection="point", legend_selection=False)
-    picker if enable_groups.value else mo.md("")
-    return (picker,)
+    # Pages show this wrapper, not `picker` itself, so picking wells doesn't redraw the plate.
+    picker_view = mo.vstack([picker])
+    return picker, picker_view
 
 
 @app.cell
-def _(enable_groups, get_groups, group_color, group_name, group_wells, mo, pl, picker, plate, set_groups):
+def _(get_groups, group_color, group_name, group_wells, mo, pl, picker, plate, set_groups):
     _sel = picker.value
     _wells = []
 
@@ -195,67 +218,71 @@ def _(enable_groups, get_groups, group_color, group_name, group_wells, mo, pl, p
             )
         )
 
-    if enable_groups.value:
-        _group_ui = mo.vstack(
-            [
-                mo.md(f"**Invalid wells:** {_well_error}") if _well_error else mo.md(""),
-                mo.hstack([group_name, group_wells, group_color, _add_button], justify="start", align="end"),
-                *_rows,
-                _clear_button,
-            ]
-        )
-    else:
-        _group_ui = mo.md("")
-
-    _group_ui
-    return
+    group_ui = mo.vstack(
+        [
+            mo.md(f"**Invalid wells:** {_well_error}") if _well_error else mo.md(""),
+            mo.hstack([group_name, group_wells, group_color, _add_button], justify="start", align="end"),
+            *_rows,
+            _clear_button,
+        ]
+    )
+    return (group_ui,)
 
 
 @app.cell
-def _(data, enable_groups, get_groups, mo, pl, plate):
-    # `layout` = well -> sample map built from your groups, `df` = data joined to it.
-    if enable_groups.value:
-        mo.stop(not get_groups(), mo.md(""))
-        layout = pl.layout_from_groups(get_groups(), plate.value)
+def _(data, get_groups, pl, plate):
+    # `layout` = well -> sample map built from your groups (or every well as one sample
+    # if you haven't made groups), `df` = data joined to it.
+    import pandas as _pd
+
+    _groups = get_groups()
+    if _groups:
+        layout = pl.layout_from_groups(_groups, plate.value)
     else:
-        layout = pl.layout_from_groups(
-            {"All wells": {"wells": pl.all_wells(plate.value)}}, plate.value
-        )
-    df = pl.attach_layout(data, layout)
-    mo.stop(df.empty, mo.md("None of the selected wells appear in this data file."))
+        layout = pl.layout_from_groups({"All wells": {"wells": pl.all_wells(plate.value)}}, plate.value)
+    try:
+        df = pl.attach_layout(data, layout) if data is not None else _pd.DataFrame()
+    except Exception:
+        df = _pd.DataFrame()
     return df, layout
 
 
 @app.cell
-def _(df, mo):
-    return
-
-
-@app.cell
-def _(df, mo, pl):
+def _(mo):
     plot_type = mo.ui.dropdown(["curves", "heatmap"], value="curves", label="Plot type")
-    plot_type
-    return (plot_type,)
+    plot_type_view = mo.hstack([plot_type], justify="start")
+    return plot_type, plot_type_view
 
 
 @app.cell
-def _(df, fmt, get_groups, pl, plate, plot_type):
-    _colors = {name: g["color"] for name, g in get_groups().items()}
-    if not _colors:
-        _colors = {"All wells": pl.PALETTE[0]}
-    fig = pl.plot_grouped(
-        df,
-        plot_type.value,
-        samples=None,
-        facet=False,
-        err=None,
-        time=None,
-        n_wells=plate.value,
-        xlabel="wavelength (nm)" if fmt.value == "spectra" else "time",
-        colors=_colors,
-    )
-    fig
-    return (fig,)
+def _(data, data_error, df, fmt, get_groups, mo, pl, plate, plot_type):
+    fig = None
+    if data_error:
+        home_plot = mo.md(f"**Couldn't read that file:** {data_error}")
+    elif data is None:
+        home_plot = mo.md("Choose a data file (or upload one) to see the plot.")
+    elif df.empty:
+        home_plot = mo.md("None of the selected wells appear in this data file.")
+    else:
+        _colors = {name: g["color"] for name, g in get_groups().items()}
+        if not _colors:
+            _colors = {"All wells": pl.PALETTE[0]}
+        try:
+            fig = pl.plot_grouped(
+                df,
+                plot_type.value,
+                samples=None,
+                facet=False,
+                err=None,
+                time=None,
+                n_wells=plate.value,
+                xlabel="wavelength (nm)" if fmt.value == "spectra" else "time",
+                colors=_colors,
+            )
+            home_plot = fig
+        except Exception as exc:
+            home_plot = mo.md(f"**Couldn't draw the plot:** {exc}")
+    return fig, home_plot
 
 
 # ---------------------------------------------------------------------------
@@ -290,7 +317,7 @@ def _(mo):
 
 
 @app.cell
-def _(alt, enable_map, get_map, mo, notes_store, pl, plate):
+def _(alt, get_map, mo, notes_store, pl, plate):
     # The grouping map: same plate layout and click/drag selection as the plot picker,
     # but each well is filled with its group color (no signal values).
     # Hover over a well to see its group and that group's notes.
@@ -337,12 +364,9 @@ def _(alt, enable_map, get_map, mo, notes_store, pl, plate):
         .properties(width=_nc * _cell, height=_nr * _cell)
     )
     map_picker = mo.ui.altair_chart(_chart, chart_selection="point", legend_selection=False)
-    (
-        mo.vstack([mo.md("## Grouping map & notes"), map_picker])
-        if enable_map.value
-        else mo.md("")
-    )
-    return (map_picker,)
+    # Pages show this wrapper, not `map_picker` itself, so clicking wells doesn't redraw the plate.
+    map_picker_view = mo.vstack([map_picker])
+    return map_picker, map_picker_view
 
 
 @app.cell
@@ -378,14 +402,14 @@ def _(get_map, map_selected):
 
 
 @app.cell
-def _(active_group, enable_map, get_map, mo, notes_store, pending, set_map, set_msg):
+def _(active_group, get_map, mo, notes_store, pending, set_map, set_msg):
     # Click a group on the map -> a box opens here with that group's notes, ready to edit.
     # Notes also save themselves when you click out of the box.
     import html as _html
 
     pending["boxes"] = {}
     _g = get_map().get(active_group) if active_group else None
-    if enable_map.value and _g is not None:
+    if _g is not None:
         _name = active_group
         _box = mo.ui.text_area(
             value=notes_store.get(_name, ""),
@@ -410,12 +434,12 @@ def _(active_group, enable_map, get_map, mo, notes_store, pending, set_map, set_
         _panel = mo.callout(mo.vstack([_head, _box, _save_btn]), kind="neutral")
     else:
         _panel = mo.md("")
-    _panel
-    return
+    notes_panel = _panel
+    return (notes_panel,)
 
 
 @app.cell
-def _(enable_map, get_map, mo, pl):
+def _(get_map, mo, pl):
     # The form for the next group: name, wells, color, notes. It is rebuilt (so it comes back
     # empty, with the next default name/color) every time a group is added or removed.
     _n = len(get_map())
@@ -426,21 +450,17 @@ def _(enable_map, get_map, mo, pl):
     map_notes = mo.ui.text_area(value="", label="Notes", rows=3, full_width=True)
     # The Add button reads these through this dict, so typing in a box never rebuilds the button.
     map_inputs = {"name": map_name, "color": map_color, "notes": map_notes}
-    (
-        mo.vstack(
-            [
-                mo.hstack([map_name, map_wells, map_color], justify="start", align="end"),
-                map_notes,
-            ]
-        )
-        if enable_map.value
-        else mo.md("")
+    map_form = mo.vstack(
+        [
+            mo.hstack([map_name, map_wells, map_color], justify="start", align="end"),
+            map_notes,
+        ]
     )
-    return map_color, map_inputs, map_name, map_notes, map_wells
+    return map_color, map_form, map_inputs, map_name, map_notes, map_wells
 
 
 @app.cell
-def _(enable_map, map_selected, map_wells, mo, pending, pl, plate):
+def _(map_selected, map_wells, mo, pending, pl, plate):
     # Live hint under the notes box. Also works out which wells the Add button will use:
     # a range typed in "Wells" wins, otherwise whatever is selected on the plate.
     _wells = list(map_selected)
@@ -460,12 +480,12 @@ def _(enable_map, map_selected, map_wells, mo, pending, pl, plate):
         _hint = mo.md(f"**{len(_wells)} wells** ready to add. Press the green button to put them in a group.")
     else:
         _hint = mo.md("")
-    _hint if enable_map.value else mo.md("")
-    return
+    map_hint = _hint
+    return (map_hint,)
 
 
 @app.cell
-def _(enable_map, get_map, get_msg, map_inputs, mo, notes_store, pending, pl, set_map, set_msg):
+def _(get_map, get_msg, map_inputs, mo, notes_store, pending, pl, set_map, set_msg):
     # The Add button (bottom of the form) and the list of groups made so far.
     import html as _html
 
@@ -523,18 +543,84 @@ def _(enable_map, get_map, get_msg, map_inputs, mo, notes_store, pending, pl, se
         )
         _rows.append(mo.hstack([mo.md(_label), _rm], justify="start", align="center"))
 
-    if enable_map.value:
-        _map_ui = mo.vstack(
-            [
-                mo.hstack([_add_button, mo.md(get_msg())], justify="start", align="center"),
-                *_rows,
-                _clear_button if _rows else mo.md(""),
-            ]
-        )
-    else:
-        _map_ui = mo.md("")
+    map_actions = mo.vstack(
+        [
+            mo.hstack([_add_button, mo.md(get_msg())], justify="start", align="center"),
+            *_rows,
+            _clear_button if _rows else mo.md(""),
+        ]
+    )
+    return (map_actions,)
 
-    _map_ui
+
+# ---------------------------------------------------------------------------
+# Pages: each cell below shows one piece, and only while its button is selected above.
+# They only read the finished pieces (never the raw inputs), so using a page never
+# redraws it out from under you.
+# ---------------------------------------------------------------------------
+@app.cell
+def _(HOME, home_controls, mo, page):
+    home_controls if page == HOME else mo.md("")
+    return
+
+
+@app.cell
+def _(HOME, mo, page, sheet_view):
+    sheet_view if page == HOME else mo.md("")
+    return
+
+
+@app.cell
+def _(HOME, mo, page, plot_type_view):
+    plot_type_view if page == HOME else mo.md("")
+    return
+
+
+@app.cell
+def _(HOME, home_plot, mo, page):
+    home_plot if page == HOME else mo.md("")
+    return
+
+
+@app.cell
+def _(GROUPING, mo, page, picker_view):
+    picker_view if page == GROUPING else mo.md("")
+    return
+
+
+@app.cell
+def _(GROUPING, group_ui, mo, page):
+    group_ui if page == GROUPING else mo.md("")
+    return
+
+
+@app.cell
+def _(MAPNOTES, map_picker_view, mo, page):
+    map_picker_view if page == MAPNOTES else mo.md("")
+    return
+
+
+@app.cell
+def _(MAPNOTES, mo, notes_panel, page):
+    notes_panel if page == MAPNOTES else mo.md("")
+    return
+
+
+@app.cell
+def _(MAPNOTES, map_form, mo, page):
+    map_form if page == MAPNOTES else mo.md("")
+    return
+
+
+@app.cell
+def _(MAPNOTES, map_hint, mo, page):
+    map_hint if page == MAPNOTES else mo.md("")
+    return
+
+
+@app.cell
+def _(MAPNOTES, map_actions, mo, page):
+    map_actions if page == MAPNOTES else mo.md("")
     return
 
 
