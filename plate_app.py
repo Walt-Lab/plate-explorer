@@ -298,7 +298,7 @@ def _(data, data_error, df, fmt, get_groups, group_plot_type, mo, pl, plate):
     elif data is None:
         group_plot = mo.md("Choose a data file on the Home page to see group spectra.")
     elif not get_groups():
-        group_plot = mo.md("Make a group above (pick wells, name it, press the green button) and its spectra will be graphed here.")
+        group_plot = mo.md("")
     elif df.empty:
         group_plot = mo.md("None of the grouped wells appear in this data file.")
     else:
