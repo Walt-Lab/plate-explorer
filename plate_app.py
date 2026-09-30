@@ -231,45 +231,49 @@ def _(get_groups, group_color, group_name, group_wells, mo, pl, picker, plate, s
 
 @app.cell
 def _(data, get_groups, pl, plate):
-    # `layout` = well -> sample map built from your groups (or every well as one sample
-    # if you haven't made groups), `df` = data joined to it.
+    # Two versions of the data, each joined to a well -> sample layout:
+    #   layout_all / df_all : every well as one sample ("All wells")     -> Home page
+    #   layout / df         : built from the groups you made             -> Grouping-based spectra
+    # (`df` is empty until you've made at least one group.)
     import pandas as _pd
 
+    def _attach(lay):
+        try:
+            return pl.attach_layout(data, lay) if data is not None else _pd.DataFrame()
+        except Exception:
+            return _pd.DataFrame()
+
+    layout_all = pl.layout_from_groups({"All wells": {"wells": pl.all_wells(plate.value)}}, plate.value)
+    df_all = _attach(layout_all)
     _groups = get_groups()
-    if _groups:
-        layout = pl.layout_from_groups(_groups, plate.value)
-    else:
-        layout = pl.layout_from_groups({"All wells": {"wells": pl.all_wells(plate.value)}}, plate.value)
-    try:
-        df = pl.attach_layout(data, layout) if data is not None else _pd.DataFrame()
-    except Exception:
-        df = _pd.DataFrame()
-    return df, layout
+    layout = pl.layout_from_groups(_groups, plate.value) if _groups else layout_all
+    df = _attach(layout) if _groups else _pd.DataFrame()
+    return df, df_all, layout, layout_all
 
 
 @app.cell
 def _(mo):
     plot_type = mo.ui.dropdown(["curves", "heatmap"], value="curves", label="Plot type")
     plot_type_view = mo.hstack([plot_type], justify="start")
-    return plot_type, plot_type_view
+    group_plot_type = mo.ui.dropdown(["curves", "heatmap"], value="curves", label="Plot type")
+    group_plot_type_view = mo.hstack([group_plot_type], justify="start")
+    return group_plot_type, group_plot_type_view, plot_type, plot_type_view
 
 
 @app.cell
-def _(data, data_error, df, fmt, get_groups, mo, pl, plate, plot_type):
+def _(data, data_error, df_all, fmt, mo, pl, plate, plot_type):
+    # Home page plot: the whole plate, no grouping.
     fig = None
     if data_error:
         home_plot = mo.md(f"**Couldn't read that file:** {data_error}")
     elif data is None:
         home_plot = mo.md("Choose a data file (or upload one) to see the plot.")
-    elif df.empty:
-        home_plot = mo.md("None of the selected wells appear in this data file.")
+    elif df_all.empty:
+        home_plot = mo.md("None of the wells appear in this data file.")
     else:
-        _colors = {name: g["color"] for name, g in get_groups().items()}
-        if not _colors:
-            _colors = {"All wells": pl.PALETTE[0]}
         try:
             fig = pl.plot_grouped(
-                df,
+                df_all,
                 plot_type.value,
                 samples=None,
                 facet=False,
@@ -277,12 +281,43 @@ def _(data, data_error, df, fmt, get_groups, mo, pl, plate, plot_type):
                 time=None,
                 n_wells=plate.value,
                 xlabel="wavelength (nm)" if fmt.value == "spectra" else "time",
-                colors=_colors,
+                colors={"All wells": pl.PALETTE[0]},
             )
             home_plot = fig
         except Exception as exc:
             home_plot = mo.md(f"**Couldn't draw the plot:** {exc}")
     return fig, home_plot
+
+
+@app.cell
+def _(data, data_error, df, fmt, get_groups, group_plot_type, mo, pl, plate):
+    # Grouping-based spectra plot: one trace per group you made, in the group's color.
+    group_fig = None
+    if data_error:
+        group_plot = mo.md(f"**Couldn't read that file:** {data_error}")
+    elif data is None:
+        group_plot = mo.md("Choose a data file on the Home page to see group spectra.")
+    elif not get_groups():
+        group_plot = mo.md("Make a group above (pick wells, name it, press the green button) and its spectra will be graphed here.")
+    elif df.empty:
+        group_plot = mo.md("None of the grouped wells appear in this data file.")
+    else:
+        try:
+            group_fig = pl.plot_grouped(
+                df,
+                group_plot_type.value,
+                samples=None,
+                facet=False,
+                err=None,
+                time=None,
+                n_wells=plate.value,
+                xlabel="wavelength (nm)" if fmt.value == "spectra" else "time",
+                colors={name: g["color"] for name, g in get_groups().items()},
+            )
+            group_plot = group_fig
+        except Exception as exc:
+            group_plot = mo.md(f"**Couldn't draw the plot:** {exc}")
+    return group_fig, group_plot
 
 
 # ---------------------------------------------------------------------------
@@ -306,14 +341,73 @@ def _():
     # Scratch space shared between cells (also a plain dict, so writing to it redraws nothing):
     #   "wells": wells the next "Add" will use   "error": problem with typed wells, if any
     #   "boxes": the notes box currently open for the clicked group
-    pending = {"wells": [], "error": "", "boxes": {}}
+    #   "overlaps": {overlap group name: (group it came from, group it came from)}
+    pending = {"wells": [], "error": "", "boxes": {}, "overlaps": {}}
     return notes_store, pending
 
 
 @app.cell
 def _(mo):
     get_msg, set_msg = mo.state("", allow_self_loops=True)  # feedback line next to the Add button
-    return get_msg, set_msg
+    # Names of overlap groups that are still waiting for you to name them / add notes.
+    get_overlaps, set_overlaps = mo.state([], allow_self_loops=True)
+    return get_msg, get_overlaps, set_msg, set_overlaps
+
+
+@app.cell
+def _():
+    # Adding a group whose wells are already in another group splits things three ways:
+    # the first group keeps its own wells, the new group keeps its own wells, and the shared
+    # wells become a NEW group whose color is the average of the two originals.
+    def _blend(c1, c2):
+        a = [int(c1[i : i + 2], 16) for i in (1, 3, 5)]
+        b = [int(c2[i : i + 2], 16) for i in (1, 3, 5)]
+        return "#{:02x}{:02x}{:02x}".format(*[(x + y) // 2 for x, y in zip(a, b)])
+
+    def _well_key(w):
+        try:
+            return (w[0], int(w[1:]))
+        except ValueError:
+            return (w, 0)
+
+    def _unique(base, taken):
+        if base not in taken:
+            return base
+        _i = 2
+        while f"{base} ({_i})" in taken:
+            _i += 1
+        return f"{base} ({_i})"
+
+    def merge_group(groups, name, wells, color):
+        """Returns (new groups, overlap groups created, names of groups left with no wells)."""
+        wells = list(dict.fromkeys(wells))
+        others = {k: v for k, v in groups.items() if k != name}  # re-adding a name replaces that group
+        owner = {w: k for k, v in others.items() for w in v["wells"]}
+        shared = {}
+        for w in wells:
+            if w in owner:
+                shared.setdefault(owner[w], []).append(w)
+        result, dropped = {}, []
+        for k, v in others.items():
+            _gone = set(shared.get(k, ()))
+            _left = [w for w in v["wells"] if w not in _gone]
+            if _left:
+                result[k] = {**v, "wells": _left}
+            else:
+                dropped.append(k)
+        own = [w for w in wells if w not in owner]
+        if own:
+            result[name] = {"wells": sorted(own, key=_well_key), "color": color}
+        else:
+            dropped.append(name)
+        overlaps = []
+        for k, ws in shared.items():
+            oname = _unique(f"{k} + {name}", set(result) | set(groups))
+            result[oname] = {"wells": sorted(ws, key=_well_key), "color": _blend(others[k]["color"], color)}
+            overlaps.append({"name": oname, "a": k, "b": name, "wells": result[oname]["wells"]})
+        return result, overlaps, dropped
+
+    return (merge_group,)
 
 
 @app.cell
@@ -439,6 +533,54 @@ def _(active_group, get_map, mo, notes_store, pending, set_map, set_msg):
 
 
 @app.cell
+def _(get_map, get_overlaps, mo, notes_store, pending, set_map, set_msg, set_overlaps):
+    # When two groups overlap, the shared wells become a new group. It already exists (with a
+    # placeholder name and a blend of the two colors); this box lets you name it and add notes.
+    import html as _html
+
+    _groups = get_map()
+    _queue = [n for n in get_overlaps() if n in _groups]
+    if _queue:
+        _key = _queue[0]
+        _g = _groups[_key]
+        _a, _b = pending["overlaps"].get(_key, ("?", "?"))
+        _shown = ", ".join(_g["wells"][:12]) + (" ..." if len(_g["wells"]) > 12 else "")
+        _more = f" ({len(_queue) - 1} more to name after this one)" if len(_queue) > 1 else ""
+        _text = mo.Html(
+            f"<span style='color:{_g['color']}'>&#9679;</span> <b>{_html.escape(_a)}</b> and "
+            f"<b>{_html.escape(_b)}</b> overlap at <b>{len(_g['wells'])} wells</b> "
+            f"({_html.escape(_shown)}). Those wells are now their own group, shown in a blend of both "
+            f"colors. Give it a name and notes:{_more}"
+        )
+        _name_box = mo.ui.text(value=_key, label="Group name", full_width=True)
+        _notes_box = mo.ui.text_area(
+            value=notes_store.get(_key, ""), label="Notes", rows=3, full_width=True,
+            placeholder="Notes for the overlapping wells...",
+        )
+
+        def _confirm(_):
+            _new = _name_box.value.strip() or _key
+            _taken = {k for k in _groups if k != _key}
+            _base, _i = _new, 2
+            while _new in _taken:  # never clash with an existing group name
+                _new = f"{_base} ({_i})"
+                _i += 1
+            _note = _notes_box.value.strip()
+            notes_store.pop(_key, None)
+            if _note:
+                notes_store[_new] = _note
+            set_overlaps(lambda q: [n for n in q if n != _key])
+            set_map(lambda g: {(_new if k == _key else k): v for k, v in g.items()})
+            set_msg(f"Created group \u201c{_new}\u201d \u2713")
+
+        _btn = mo.ui.button(label="Create group", kind="success", on_click=_confirm)
+        map_overlap_prompt = mo.callout(mo.vstack([_text, _name_box, _notes_box, _btn]), kind="info")
+    else:
+        map_overlap_prompt = mo.md("")
+    return (map_overlap_prompt,)
+
+
+@app.cell
 def _(get_map, mo, pl):
     # The form for the next group: name, wells, color, notes. It is rebuilt (so it comes back
     # empty, with the next default name/color) every time a group is added or removed.
@@ -460,7 +602,7 @@ def _(get_map, mo, pl):
 
 
 @app.cell
-def _(map_selected, map_wells, mo, pending, pl, plate):
+def _(get_map, map_inputs, map_selected, map_wells, mo, pending, pl, plate):
     # Live hint under the notes box. Also works out which wells the Add button will use:
     # a range typed in "Wells" wins, otherwise whatever is selected on the plate.
     _wells = list(map_selected)
@@ -477,7 +619,13 @@ def _(map_selected, map_wells, mo, pending, pl, plate):
     if _err:
         _hint = mo.md(f"**Invalid wells:** {_err}")
     elif _wells:
-        _hint = mo.md(f"**{len(_wells)} wells** ready to add. Press the green button to put them in a group.")
+        _mine = map_inputs["name"].value.strip()
+        _owned = {w for k, g in get_map().items() if k != _mine for w in g["wells"]}
+        _shared = [w for w in _wells if w in _owned]
+        _txt = f"**{len(_wells)} wells** ready to add. Press the green button to put them in a group."
+        if _shared:
+            _txt += f" {len(_shared)} of them already belong to another group, so they'll become a new overlap group."
+        _hint = mo.md(_txt)
     else:
         _hint = mo.md("")
     map_hint = _hint
@@ -485,7 +633,7 @@ def _(map_selected, map_wells, mo, pending, pl, plate):
 
 
 @app.cell
-def _(get_map, get_msg, map_inputs, mo, notes_store, pending, pl, set_map, set_msg):
+def _(get_map, get_msg, map_inputs, merge_group, mo, notes_store, pending, pl, set_map, set_msg, set_overlaps):
     # The Add button (bottom of the form) and the list of groups made so far.
     import html as _html
 
@@ -508,10 +656,20 @@ def _(get_map, get_msg, map_inputs, mo, notes_store, pending, pl, set_map, set_m
                 for _n, _b in pending["boxes"].items():
                     if _n in _groups_now:
                         notes_store[_n] = (_b.value or "").strip()
-                if _note:  # a blank box keeps any notes the group already has
+                _result, _overlaps, _dropped = merge_group(get_map(), _name, _wells, _color)
+                for _d in _dropped:
+                    notes_store.pop(_d, None)
+                if _note and _name in _result:  # a blank box keeps any notes the group already has
                     notes_store[_name] = _note
-                set_map(lambda g: pl.assign_wells(g, _name, _wells, _color))
-                set_msg(f"Added {len(_wells)} wells to \u201c{_name}\u201d \u2713")
+                for _o in _overlaps:
+                    pending["overlaps"][_o["name"]] = (_o["a"], _o["b"])
+                set_map(_result)
+                set_overlaps(lambda q: [n for n in q if n in _result] + [o["name"] for o in _overlaps])
+                if _overlaps:
+                    _made = ", ".join(f"\u201c{o['name']}\u201d" for o in _overlaps)
+                    set_msg(f"Overlap found. New group(s) {_made} created from the shared wells: name them above.")
+                else:
+                    set_msg(f"Added {len(_wells)} wells to \u201c{_name}\u201d \u2713")
             elif _note and _name in _groups_now:
                 # No wells chosen: just save the notes onto the existing group with this name.
                 notes_store[_name] = _note
@@ -525,7 +683,7 @@ def _(get_map, get_msg, map_inputs, mo, notes_store, pending, pl, set_map, set_m
     _add_button = mo.ui.button(label="Add selected wells to group", kind="success", on_click=_add)
     _clear_button = mo.ui.button(
         label="Clear all groups",
-        on_click=lambda v: (notes_store.clear(), set_msg(""), set_map({})),
+        on_click=lambda v: (notes_store.clear(), set_msg(""), set_overlaps([]), set_map({})),
     )
 
     _rows = []
@@ -595,6 +753,18 @@ def _(GROUPING, group_ui, mo, page):
 
 
 @app.cell
+def _(GROUPING, group_plot_type_view, mo, page):
+    group_plot_type_view if page == GROUPING else mo.md("")
+    return
+
+
+@app.cell
+def _(GROUPING, group_plot, mo, page):
+    group_plot if page == GROUPING else mo.md("")
+    return
+
+
+@app.cell
 def _(MAPNOTES, map_picker_view, mo, page):
     map_picker_view if page == MAPNOTES else mo.md("")
     return
@@ -603,6 +773,12 @@ def _(MAPNOTES, map_picker_view, mo, page):
 @app.cell
 def _(MAPNOTES, mo, notes_panel, page):
     notes_panel if page == MAPNOTES else mo.md("")
+    return
+
+
+@app.cell
+def _(MAPNOTES, map_overlap_prompt, mo, page):
+    map_overlap_prompt if page == MAPNOTES else mo.md("")
     return
 
 
