@@ -21,18 +21,18 @@ def _():
 # ---------------------------------------------------------------------------
 @app.cell
 def _(mo):
-    HOME = "Home page"
+    HOME = "Data overview"
     GROUPING = "Grouping-based spectra"
     MAPNOTES = "Grouping map & notes"
-    nav = mo.ui.tabs({HOME: mo.md(""), GROUPING: mo.md(""), MAPNOTES: mo.md("")})
+    nav = mo.ui.tabs({MAPNOTES: mo.md(""), HOME: mo.md(""), GROUPING: mo.md("")})
     mo.vstack([mo.md("# Plate explorer"), nav])
     return GROUPING, HOME, MAPNOTES, nav
 
 
 @app.cell
 def _(GROUPING, HOME, MAPNOTES, nav):
-    # Name of the page whose button is selected (falls back to the Home page).
-    page = nav.value if nav.value in (HOME, GROUPING, MAPNOTES) else HOME
+    # Name of the page whose button is selected (falls back to the first tab).
+    page = nav.value if nav.value in (HOME, GROUPING, MAPNOTES) else MAPNOTES
     return (page,)
 
 
@@ -350,7 +350,7 @@ def _(get_groups, group_color, group_name, group_wells, group_plate, mo, pl, pic
         if _wells and _name and _name not in get_groups():
             set_groups(lambda g: pl.assign_wells(g, _name, _wells, group_color.value))
 
-    _add_button = mo.ui.button(label="Create group from selected wells", kind="success", on_click=_add)
+    _add_button = mo.ui.button(label="Create group", kind="success", on_click=_add)
     _clear_button = mo.ui.button(label="Clear all groups", on_click=lambda v: set_groups({}))
 
     _rows = []
@@ -600,7 +600,7 @@ def _(mo):
 
 @app.cell
 def _():
-    # Adding a group preserves every other group's well membership.
+    # A well can belong to only one group; adding it elsewhere reassigns it.
     def _well_key(w):
         try:
             return (w[0], int(w[1:]))
@@ -608,12 +608,18 @@ def _():
             return (w, 0)
 
     def merge_group(groups, name, wells, color):
-        """Add selected wells to a group without changing other memberships."""
+        """Add selected wells to a group, removing them from other groups."""
         result = {key: dict(info) for key, info in groups.items()}
+        wells = set(wells)
+        for group_name, info in result.items():
+            if group_name != name:
+                info["wells"] = [
+                    well for well in info.get("wells", []) if well not in wells
+                ]
         current = result.get(name, {})
         result[name] = {
             **current,
-            "wells": sorted(set(current.get("wells", [])) | set(wells), key=_well_key),
+            "wells": sorted(set(current.get("wells", [])) | wells, key=_well_key),
             "color": color or current.get("color"),
         }
         return result
@@ -622,7 +628,18 @@ def _():
 
 
 @app.cell
-def _(alt, get_map, home_plate, mo, notes_store, pl):
+def _(mo):
+    map_note_search = mo.ui.text(
+        value="",
+        label="Highlight wells by note keyword",
+        placeholder="e.g. control, high dose",
+        full_width=True,
+    )
+    return (map_note_search,)
+
+
+@app.cell
+def _(alt, get_map, home_plate, map_note_search, mo, notes_store, pl):
     # The grouping map: same plate layout and click/drag selection as the plot picker,
     # but each well is filled with its group color (no signal values).
     # Hover over a well to see its group and that group's notes.
@@ -640,6 +657,25 @@ def _(alt, get_map, home_plate, mo, notes_store, pl):
             )
             for well in _table["well"]
         }
+    )
+    _keyword = map_note_search.value.strip().casefold()
+    _matching_groups = {
+        name
+        for name, note in notes_store.items()
+        if _keyword and _keyword in (note or "").casefold()
+    }
+    _highlight_wells = {
+        well
+        for name in _matching_groups
+        for well in _groups.get(name, {}).get("wells", [])
+    }
+    _highlight_color = "#ffd54f"
+    _table["note_match"] = _table["well"].isin(_highlight_wells)
+    _table["fill_color"] = _table.apply(
+        lambda row: (
+            _highlight_color if row["note_match"] else row["group_color"]
+        ),
+        axis=1,
     )
 
     _nr, _nc = pl.plate_shape(home_plate.value)
@@ -665,6 +701,28 @@ def _(alt, get_map, home_plate, mo, notes_store, pl):
                 axis=alt.Axis(grid=False, ticks=False),
             ),
             color=alt.Color(
+                "fill_color:N",
+                scale=alt.Scale(
+                    domain=list(
+                        dict.fromkeys(
+                            [
+                                *_table["group_color"].tolist(),
+                                _highlight_color,
+                            ]
+                        )
+                    ),
+                    range=list(
+                        dict.fromkeys(
+                            [
+                                *_table["group_color"].tolist(),
+                                _highlight_color,
+                            ]
+                        )
+                    ),
+                ),
+                legend=None,
+            ),
+            stroke=alt.Stroke(
                 "group:N",
                 scale=alt.Scale(
                     domain=_group_colors.index.tolist(),
@@ -674,14 +732,54 @@ def _(alt, get_map, home_plate, mo, notes_store, pl):
             ),
             strokeWidth=alt.condition(_selection, alt.value(3), alt.value(1)),
             opacity=alt.condition(_selection, alt.value(1.0), alt.value(0.35)),
-            tooltip=["well", "group", alt.Tooltip("notes:N", title="Notes")],
+            tooltip=[
+                "well",
+                "group",
+                alt.Tooltip("notes:N", title="Notes"),
+                alt.Tooltip("note_match:N", title="Keyword match"),
+            ],
         )
         .add_params(_selection)
         .properties(width=_nc * _cell, height=_nr * _cell)
     )
     map_picker = mo.ui.altair_chart(_chart, chart_selection="point", legend_selection=False)
     # Pages show this wrapper, not `map_picker` itself, so clicking wells doesn't redraw the plate.
-    map_picker_view = mo.vstack([map_picker])
+    _match_status = (
+        mo.md(f"**{len(_highlight_wells)} wells highlighted** for “{_keyword}”.")
+        if _keyword
+        else mo.md("Search notes to fill-highlight wells whose group notes contain the keyword.")
+    )
+    if _highlight_wells:
+        _sorted_wells = sorted(_highlight_wells, key=pl.parse_well)
+        _coordinate_ranges = []
+        _row_wells = {}
+        for _well in _sorted_wells:
+            _row, _column = pl.parse_well(_well)
+            _row_wells.setdefault(_row, []).append(_column + 1)
+        for _row, _columns in _row_wells.items():
+            _start = _previous = _columns[0]
+            for _column in _columns[1:] + [None]:
+                if _column is not None and _column == _previous + 1:
+                    _previous = _column
+                    continue
+                _row_label = chr(65 + _row)
+                _coordinate_ranges.append(
+                    f"{_row_label}{_start}"
+                    + (f"-{_row_label}{_previous}" if _previous > _start else "")
+                )
+                if _column is not None:
+                    _start = _previous = _column
+        _coordinates = ", ".join(_coordinate_ranges)
+        _coordinate_output = mo.md(
+            f"**Coordinates for the grouping spectra well box:**  \n`{_coordinates}`"
+        )
+    elif _keyword:
+        _coordinate_output = mo.md("No matching wells to list.")
+    else:
+        _coordinate_output = mo.md("")
+    map_picker_view = mo.vstack(
+        [map_note_search, _match_status, _coordinate_output, map_picker]
+    )
     return map_picker, map_picker_view
 
 
@@ -710,7 +808,7 @@ def _(home_plate, map_picker, pl):
 
 @app.cell
 def _(get_map, map_selected, mo):
-    # Overlapping selections can target any group common to the selected wells.
+    # Selecting wells from one group opens that group's notes.
     _groups = get_map()
     _common = [
         name
@@ -812,12 +910,12 @@ def _(get_map, home_plate, map_inputs, map_selected, map_wells, mo, pending, pl)
     elif _wells:
         _mine = map_inputs["name"].value.strip()
         _txt = f"**{len(_wells)} wells** ready to add. Press the green button to put them in a group."
-        _shared = sum(
+        _reassigned = sum(
             any(name != _mine and well in group["wells"] for name, group in get_map().items())
-            for well in _wells
+            for well in set(_wells)
         )
-        if _shared:
-            _txt += f" {_shared} already belong to other groups; they will remain in those groups too."
+        if _reassigned:
+            _txt += f" {_reassigned} will be reassigned from their current groups."
         _hint = mo.md(_txt)
     else:
         _hint = mo.md("")
