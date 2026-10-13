@@ -371,26 +371,30 @@ def _(get_groups, group_color, group_name, group_wells, group_plate, mo, pl, pic
             ),
         )
         _rm = mo.ui.button(
-            label="Delete group",
+            label="Delete entire group",
             on_click=lambda v, n=_gname: set_groups(lambda g: pl.remove_group(g, n)),
         )
         _rows.append(
-            mo.hstack(
+            mo.vstack(
                 [
-                    mo.md(f"<span style='color:{_g['color']}'>&#9679;</span> **{_gname}**, {len(_g['wells'])} wells"),
-                    _edit_action,
-                    _edit_button,
+                    mo.hstack(
+                        [
+                            mo.md(f"<span style='color:{_g['color']}'>&#9679;</span> **{_gname}**, {len(_g['wells'])} wells"),
+                            _edit_action,
+                            _edit_button,
+                        ],
+                        justify="start",
+                        align="center",
+                    ),
                     _rm,
                 ],
-                justify="start",
-                align="center",
+                align="start",
             )
         )
 
     group_ui = mo.vstack(
         [
-            mo.md("Select wells on the plate or enter coordinates, then add/remove them using the controls beside a group."),
-            mo.md("Use a new name to create a group; edit an existing group with its Add/Remove controls."),
+            mo.md("Edit an existing grouping of wells using the Add/Remove controls."),
             mo.md(f"**Invalid wells:** {_well_error}") if _well_error else mo.md(""),
             mo.hstack([group_name, group_wells, group_color, _add_button], justify="start", align="end"),
             *_rows,
