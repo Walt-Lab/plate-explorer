@@ -394,7 +394,9 @@ def _(get_groups, group_color, group_name, group_wells, group_plate, mo, pl, pic
 
     group_ui = mo.vstack(
         [
-            mo.md("Edit an existing grouping of wells using the Add/Remove controls."),
+            mo.md("Edit an existing grouping of wells using the Add/Remove controls.")
+            if get_groups()
+            else mo.md(""),
             mo.md(f"**Invalid wells:** {_well_error}") if _well_error else mo.md(""),
             mo.hstack([group_name, group_wells, group_color, _add_button], justify="start", align="end"),
             *_rows,
