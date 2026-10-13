@@ -19,6 +19,7 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+from matplotlib.colors import to_rgb
 
 PLATE_SHAPES = {6: (2, 3), 12: (3, 4), 24: (4, 6), 48: (6, 8), 96: (8, 12), 384: (16, 24)}
 PLOT_TYPES = ["curves", "bar", "box", "heatmap"]
@@ -502,9 +503,11 @@ def plot_plate_heatmap(df, n_wells=96, time=None, cmap="viridis"):
     return fig
 
 
-def plot_curves(df, facet=False, ncols=3, err="sd", xlabel="time", colors=None):
+def plot_curves(df, facet=False, ncols=3, err="sd", xlabel="time", colors=None, trace_mode="average"):
     if df["time"].isna().all():
         raise ValueError("No time column in this data - use 'bar', 'box' or 'heatmap'.")
+    if trace_mode not in {"average", "individual", "both"}:
+        raise ValueError("trace_mode must be 'average', 'individual', or 'both'.")
     samples = list(df["sample"].unique())
     colors = colors or {}
     stats = summarize(df).sort_values("time")
@@ -522,15 +525,39 @@ def plot_curves(df, facet=False, ncols=3, err="sd", xlabel="time", colors=None):
             ax.axis("off")
     else:
         fig, ax = plt.subplots(figsize=(7, 4.5))
-        for s in samples:
+        cycle_colors = plt.rcParams["axes.prop_cycle"].by_key()["color"]
+        for sample_index, s in enumerate(samples):
             st = stats[stats["sample"] == s]
-            color = colors.get(s)
+            color = colors.get(s) or cycle_colors[sample_index % len(cycle_colors)]
             x = pd.to_numeric(st["time"], errors="coerce").to_numpy(dtype=float)
             mean = pd.to_numeric(st["mean"], errors="coerce").to_numpy(dtype=float)
-            (line,) = ax.plot(x, mean, lw=2, label=s, color=color)
-            if err:
+            if trace_mode != "individual":
+                (line,) = ax.plot(x, mean, lw=2.5, label=s, color=color, zorder=4)
+            if err and trace_mode != "individual":
                 band = pd.to_numeric(st[err], errors="coerce").fillna(0).to_numpy(dtype=float)
                 ax.fill_between(x, mean - band, mean + band, color=line.get_color(), alpha=0.2)
+            if trace_mode != "average":
+                rgb = to_rgb(color)
+                wells = list(df.loc[df["sample"] == s, "well"].drop_duplicates().sort_values())
+                lightness = np.linspace(0.48, 0.12, len(wells))
+                shades = [
+                    tuple(channel + (1 - channel) * amount for channel in rgb)
+                    for amount in lightness
+                ]
+                for well_index, (well, well_data) in enumerate(
+                    df.loc[df["sample"] == s].groupby("well", sort=True)
+                ):
+                    well_x = pd.to_numeric(well_data["time"], errors="coerce").to_numpy(dtype=float)
+                    well_y = pd.to_numeric(well_data["value"], errors="coerce").to_numpy(dtype=float)
+                    ax.plot(
+                        well_x,
+                        well_y,
+                        color=shades[well_index],
+                        alpha=0.85,
+                        lw=0.9,
+                        label=s if trace_mode == "individual" and well_index == 0 else "_nolegend_",
+                        zorder=2,
+                    )
         ax.set_xlabel(xlabel)
         ax.set_ylabel("value")
         ax.legend()
@@ -572,14 +599,34 @@ def plot_box(df, time=None, colors=None):
     return fig
 
 
-def plot_grouped(df, plot_type="curves", samples=None, facet=False, time=None, err="sd", n_wells=96, ncols=3, xlabel="time", colors=None):
+def plot_grouped(
+    df,
+    plot_type="curves",
+    samples=None,
+    facet=False,
+    time=None,
+    err="sd",
+    n_wells=96,
+    ncols=3,
+    xlabel="time",
+    colors=None,
+    trace_mode="average",
+):
     """One entry point: filter to `samples`, then draw `plot_type` ('curves','bar','box','heatmap')."""
     if samples:
         df = df[df["sample"].isin(samples)]
     if df.empty:
         raise ValueError("Nothing to plot - check the layout and sample selection.")
     if plot_type == "curves":
-        return plot_curves(df, facet=facet, ncols=ncols, err=err, xlabel=xlabel, colors=colors)
+        return plot_curves(
+            df,
+            facet=facet,
+            ncols=ncols,
+            err=err,
+            xlabel=xlabel,
+            colors=colors,
+            trace_mode=trace_mode,
+        )
     if plot_type == "bar":
         return plot_bars(df, time, colors=colors)
     if plot_type == "box":

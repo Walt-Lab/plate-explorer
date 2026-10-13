@@ -400,11 +400,20 @@ def _(group_data_choice, group_plate, group_sheet, home_data_choice, home_plate,
         justify="start",
     )
     group_plot_type = mo.ui.dropdown(["curves", "heatmap"], value="curves", label="Plot type")
+    group_trace_mode = mo.ui.dropdown(
+        {
+            "Average": "average",
+            "Individual wells": "individual",
+            "Average + individual": "both",
+        },
+        value="average",
+        label="Trace display (curves)",
+    )
     group_plot_controls = mo.hstack(
-        [group_sheet, group_data_choice, group_plot_type, group_plate],
+        [group_sheet, group_data_choice, group_plot_type, group_trace_mode, group_plate],
         justify="start",
     )
-    return group_plot_controls, group_plot_type, home_plot_controls, plot_type
+    return group_plot_controls, group_plot_type, group_trace_mode, home_plot_controls, plot_type
 
 
 @app.cell
@@ -437,7 +446,7 @@ def _(df_all, home_axis_label, home_data, home_data_error, home_plate, mo, pl, p
 
 
 @app.cell
-def _(df, get_groups, group_axis_label, group_data, group_data_error, group_plate, group_plot_type, mo, pl):
+def _(df, get_groups, group_axis_label, group_data, group_data_error, group_plate, group_plot_type, group_trace_mode, mo, pl):
     # Grouping-based spectra plot: one trace per group you made, in the group's color.
     group_fig = None
     if group_data_error:
@@ -460,6 +469,7 @@ def _(df, get_groups, group_axis_label, group_data, group_data_error, group_plat
                 n_wells=group_plate.value,
                 xlabel=group_axis_label,
                 colors={name: g["color"] for name, g in get_groups().items()},
+                trace_mode=group_trace_mode.value,
             )
             group_plot = group_fig
         except Exception as exc:
