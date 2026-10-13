@@ -457,12 +457,37 @@ def _(df, get_groups, group_axis_label, group_data, group_data_error, group_plat
                 trace_mode=group_trace_mode.value,
             )
             if group_plot_type.value == "curves":
-                _stats = pl.summarize_curves(df, x_label=group_axis_label)
+                _stats = pl.summarize_curves(df)
+                _summary_lines = [
+                    f"- **{row['sample']}** — mean = {row['mean']:.3g}; "
+                    f"median = {row['median']:.3g}; standard deviation = {row['std']:.3g}"
+                    for _, row in _stats.iterrows()
+                ]
+                _comparison_lines = []
+                for _first in range(len(_stats)):
+                    for _second in range(_first + 1, len(_stats)):
+                        _a = _stats.iloc[_first]
+                        _b = _stats.iloc[_second]
+                        _comparison_lines.append(
+                            f"- **{_a['sample']} vs {_b['sample']}** — "
+                            f"difference in means = {_a['mean'] - _b['mean']:.3g}; "
+                            f"difference in medians = {_a['median'] - _b['median']:.3g}; "
+                            f"difference in standard deviations = {_a['std'] - _b['std']:.3g}"
+                        )
+                _stats_view = mo.md(
+                    "### Curve summary\n\n"
+                    + "\n".join(_summary_lines)
+                    + (
+                        "\n\n### Between-group differences\n\n"
+                        + "\n".join(_comparison_lines)
+                        if _comparison_lines
+                        else ""
+                    )
+                )
                 group_plot = mo.vstack(
                     [
                         group_fig,
-                        mo.md("### Curve statistics"),
-                        mo.ui.table(_stats, show_download=True),
+                        _stats_view,
                     ]
                 )
             else:
