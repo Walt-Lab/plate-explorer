@@ -243,7 +243,7 @@ def _(get_groups, mo, pl):
     # Name/colour boxes for the next group; they advance automatically after each "Add".
     _n = len(get_groups())
     _names = list(pl.COLOR_CHOICES)
-    group_name = mo.ui.text(value=f"Group {_n + 1}", label="Group name")
+    group_name = mo.ui.text(value=f"Group {_n + 1}", label="New group name")
     group_color = mo.ui.dropdown(pl.COLOR_CHOICES, value=_names[_n % len(_names)], label="Color")
     group_wells = mo.ui.text(value="", label="Wells (e.g. A1-A5)")
     return group_color, group_name, group_wells
@@ -271,8 +271,7 @@ def _(alt, get_groups, group_data, group_plate, mo, pl):
     _nr, _nc = pl.plate_shape(group_plate.value)
     _cell = 34 if _nr <= 8 else 26
     _size = 700 if _nr <= 8 else 400
-    _domain = ["(unassigned)"] + list(_groups)
-    _range = ["#bbbbbb"] + [g["color"] for g in _groups.values()]
+    _group_colors = _table.groupby("group", sort=False)["group_color"].first()
     _selection = alt.selection_point(fields=["well"], empty="all")
     _chart = (
         alt.Chart(_table)
@@ -299,7 +298,10 @@ def _(alt, get_groups, group_data, group_plate, mo, pl):
             ),
             stroke=alt.Stroke(
                 "group:N",
-                scale=alt.Scale(domain=_domain, range=_range),
+                scale=alt.Scale(
+                    domain=_group_colors.index.tolist(),
+                    range=_group_colors.tolist(),
+                ),
                 legend=alt.Legend(title="Group"),
             ),
             strokeWidth=alt.condition(_selection, alt.value(3), alt.value(1)),
@@ -345,25 +347,61 @@ def _(get_groups, group_color, group_name, group_wells, group_plate, mo, pl, pic
 
     def _add(_):
         _name = group_name.value.strip()
-        if _wells and _name:
+        if _wells and _name and _name not in get_groups():
             set_groups(lambda g: pl.assign_wells(g, _name, _wells, group_color.value))
 
-    _add_button = mo.ui.button(label="Add selected wells to group", kind="success", on_click=_add)
+    _add_button = mo.ui.button(label="Create group from selected wells", kind="success", on_click=_add)
     _clear_button = mo.ui.button(label="Clear all groups", on_click=lambda v: set_groups({}))
 
     _rows = []
     for _gname, _g in get_groups().items():
-        _rm = mo.ui.button(label="Remove", on_click=lambda v, n=_gname: set_groups(lambda g: pl.remove_group(g, n)))
+        _edit_action = mo.ui.dropdown(
+            {"Add selected wells": "add", "Remove selected wells": "remove"},
+            value="Add selected wells",
+            label="",
+        )
+        _edit_button = mo.ui.button(
+            label="Apply",
+            on_click=lambda v, n=_gname, a=_edit_action: (
+                set_groups(
+                    lambda g: pl.update_group_wells(
+                        g, n, _wells, a.value
+                    )
+                )
+                if _wells and not _well_error
+                else None
+            ),
+        )
+        _rm = mo.ui.button(
+            label="Delete group",
+            on_click=lambda v, n=_gname: set_groups(lambda g: pl.remove_group(g, n)),
+        )
         _rows.append(
-            mo.hstack(
-                [mo.md(f"<span style='color:{_g['color']}'>&#9679;</span> **{_gname}**, {len(_g['wells'])} wells"), _rm],
-                justify="start",
-                align="center",
+            mo.vstack(
+                [
+                    mo.hstack(
+                        [
+                            mo.md(f"<span style='color:{_g['color']}'>&#9679;</span> **{_gname}**, {len(_g['wells'])} wells"),
+                            _edit_action,
+                            _edit_button,
+                        ],
+                        justify="start",
+                        align="center",
+                    ),
+                    _rm,
+                ],
+                align="start",
             )
         )
 
     group_ui = mo.vstack(
         [
+            mo.md(
+                "Edit an existing grouping of wells using the Add/Remove controls. "
+                "A well can belong to multiple groups."
+            )
+            if get_groups()
+            else mo.md(""),
             mo.md(f"**Invalid wells:** {_well_error}") if _well_error else mo.md(""),
             mo.hstack([group_name, group_wells, group_color, _add_button], justify="start", align="end"),
             *_rows,
@@ -497,42 +535,35 @@ def _(df, get_groups, group_axis_label, group_data, group_data_error, group_plat
                 colors={name: g["color"] for name, g in get_groups().items()},
                 trace_mode=group_trace_mode.value,
             )
-            if group_plot_type.value == "curves":
-                _stats = pl.summarize_curves(df)
-                _summary_lines = [
-                    f"- **{row['sample']}** — mean = {row['mean']:.3g}; "
-                    f"median = {row['median']:.3g}; standard deviation = {row['std']:.3g}"
-                    for _, row in _stats.iterrows()
-                ]
-                _comparison_lines = []
-                for _first in range(len(_stats)):
-                    for _second in range(_first + 1, len(_stats)):
-                        _a = _stats.iloc[_first]
-                        _b = _stats.iloc[_second]
-                        _comparison_lines.append(
-                            f"- **{_a['sample']} vs {_b['sample']}** — "
-                            f"absolute difference in means = {abs(_a['mean'] - _b['mean']):.3g}; "
-                            f"absolute difference in medians = {abs(_a['median'] - _b['median']):.3g}; "
-                            f"absolute difference in standard deviations = {abs(_a['std'] - _b['std']):.3g}"
-                        )
-                _stats_view = mo.md(
-                    "### Curve summary\n\n"
-                    + "\n".join(_summary_lines)
-                    + (
-                        "\n\n### Between-group differences\n\n"
-                        + "\n".join(_comparison_lines)
-                        if _comparison_lines
-                        else ""
+            _stats_data = pl.endpoint(df) if group_plot_type.value == "heatmap" else df
+            _stats = pl.summarize_group_values(_stats_data)
+            _summary_lines = [
+                f"- **{row['sample']}** — mean = {row['mean']:.3g}; "
+                f"median = {row['median']:.3g}; standard deviation = {row['std']:.3g}"
+                for _, row in _stats.iterrows()
+            ]
+            _comparison_lines = []
+            for _first in range(len(_stats)):
+                for _second in range(_first + 1, len(_stats)):
+                    _a = _stats.iloc[_first]
+                    _b = _stats.iloc[_second]
+                    _comparison_lines.append(
+                        f"- **{_a['sample']} vs {_b['sample']}** — "
+                        f"absolute difference in means = {abs(_a['mean'] - _b['mean']):.3g}; "
+                        f"absolute difference in medians = {abs(_a['median'] - _b['median']):.3g}; "
+                        f"absolute difference in standard deviations = {abs(_a['std'] - _b['std']):.3g}"
                     )
+            _stats_view = mo.md(
+                "### Group summary\n\n"
+                + "\n".join(_summary_lines)
+                + (
+                    "\n\n### Between-group differences\n\n"
+                    + "\n".join(_comparison_lines)
+                    if _comparison_lines
+                    else ""
                 )
-                group_plot = mo.vstack(
-                    [
-                        group_fig,
-                        _stats_view,
-                    ]
-                )
-            else:
-                group_plot = group_fig
+            )
+            group_plot = mo.vstack([group_fig, _stats_view])
         except Exception as exc:
             group_plot = mo.md(f"**Couldn't draw the plot:** {exc}")
     return group_fig, group_plot
@@ -556,74 +587,36 @@ def _():
     # {group name: notes text}. A plain dict on purpose: typing a note never redraws the
     # plate or the forms, so nothing you typed can be wiped out when something else changes.
     notes_store = {}
-    # Scratch space shared between cells (also a plain dict, so writing to it redraws nothing):
-    #   "wells": wells the next "Add" will use   "error": problem with typed wells, if any
-    #   "boxes": the notes box currently open for the clicked group
-    #   "overlaps": {overlap group name: (group it came from, group it came from)}
-    pending = {"wells": [], "error": "", "boxes": {}, "overlaps": {}}
+    # Scratch space shared between cells; writing to it redraws nothing.
+    pending = {"wells": [], "error": "", "boxes": {}}
     return notes_store, pending
 
 
 @app.cell
 def _(mo):
     get_msg, set_msg = mo.state("", allow_self_loops=True)  # feedback line next to the Add button
-    # Names of overlap groups that are still waiting for you to name them / add notes.
-    get_overlaps, set_overlaps = mo.state([], allow_self_loops=True)
-    return get_msg, get_overlaps, set_msg, set_overlaps
+    return get_msg, set_msg
 
 
 @app.cell
 def _():
-    # Adding a group whose wells are already in another group splits things three ways:
-    # the first group keeps its own wells, the new group keeps its own wells, and the shared
-    # wells become a NEW group whose color is the average of the two originals.
-    def _blend(c1, c2):
-        a = [int(c1[i : i + 2], 16) for i in (1, 3, 5)]
-        b = [int(c2[i : i + 2], 16) for i in (1, 3, 5)]
-        return "#{:02x}{:02x}{:02x}".format(*[(x + y) // 2 for x, y in zip(a, b)])
-
+    # Adding a group preserves every other group's well membership.
     def _well_key(w):
         try:
             return (w[0], int(w[1:]))
         except ValueError:
             return (w, 0)
 
-    def _unique(base, taken):
-        if base not in taken:
-            return base
-        _i = 2
-        while f"{base} ({_i})" in taken:
-            _i += 1
-        return f"{base} ({_i})"
-
     def merge_group(groups, name, wells, color):
-        """Returns (new groups, overlap groups created, names of groups left with no wells)."""
-        wells = list(dict.fromkeys(wells))
-        others = {k: v for k, v in groups.items() if k != name}  # re-adding a name replaces that group
-        owner = {w: k for k, v in others.items() for w in v["wells"]}
-        shared = {}
-        for w in wells:
-            if w in owner:
-                shared.setdefault(owner[w], []).append(w)
-        result, dropped = {}, []
-        for k, v in others.items():
-            _gone = set(shared.get(k, ()))
-            _left = [w for w in v["wells"] if w not in _gone]
-            if _left:
-                result[k] = {**v, "wells": _left}
-            else:
-                dropped.append(k)
-        own = [w for w in wells if w not in owner]
-        if own:
-            result[name] = {"wells": sorted(own, key=_well_key), "color": color}
-        else:
-            dropped.append(name)
-        overlaps = []
-        for k, ws in shared.items():
-            oname = _unique(f"{k} + {name}", set(result) | set(groups))
-            result[oname] = {"wells": sorted(ws, key=_well_key), "color": _blend(others[k]["color"], color)}
-            overlaps.append({"name": oname, "a": k, "b": name, "wells": result[oname]["wells"]})
-        return result, overlaps, dropped
+        """Add selected wells to a group without changing other memberships."""
+        result = {key: dict(info) for key, info in groups.items()}
+        current = result.get(name, {})
+        result[name] = {
+            **current,
+            "wells": sorted(set(current.get("wells", [])) | set(wells), key=_well_key),
+            "color": color or current.get("color"),
+        }
+        return result
 
     return (merge_group,)
 
@@ -638,13 +631,21 @@ def _(alt, get_map, home_plate, mo, notes_store, pl):
     _table["col"] = _table["col"].astype(int) + 1
     _table["row"] = _table["row"].astype(int) + 1
     _table["row_label"] = [chr(64 + int(r)) for r in _table["row"]]
-    _table["notes"] = _table["group"].map({k: notes_store.get(k, "") for k in _groups}).fillna("")
+    _table["notes"] = _table["well"].map(
+        {
+            well: "; ".join(
+                f"{name}: {notes_store[name]}"
+                for name, group in _groups.items()
+                if well in group["wells"] and notes_store.get(name)
+            )
+            for well in _table["well"]
+        }
+    )
 
     _nr, _nc = pl.plate_shape(home_plate.value)
     _cell = 34 if _nr <= 8 else 26
     _size = 700 if _nr <= 8 else 400
-    _domain = ["(unassigned)"] + list(_groups)
-    _range = ["#eeeeee"] + [g["color"] for g in _groups.values()]
+    _group_colors = _table.groupby("group", sort=False)["group_color"].first()
     _selection = alt.selection_point(fields=["well"], empty="all")
     _chart = (
         alt.Chart(_table)
@@ -665,7 +666,10 @@ def _(alt, get_map, home_plate, mo, notes_store, pl):
             ),
             color=alt.Color(
                 "group:N",
-                scale=alt.Scale(domain=_domain, range=_range),
+                scale=alt.Scale(
+                    domain=_group_colors.index.tolist(),
+                    range=_group_colors.tolist(),
+                ),
                 legend=alt.Legend(title="Group"),
             ),
             strokeWidth=alt.condition(_selection, alt.value(3), alt.value(1)),
@@ -705,16 +709,29 @@ def _(home_plate, map_picker, pl):
 
 
 @app.cell
-def _(get_map, map_selected):
-    # The group you clicked on: set only when every selected well belongs to the same group.
+def _(get_map, map_selected, mo):
+    # Overlapping selections can target any group common to the selected wells.
     _groups = get_map()
-    _owners = {next((n for n, g in _groups.items() if w in g["wells"]), None) for w in map_selected}
-    active_group = next(iter(_owners)) if len(_owners) == 1 and None not in _owners else None
-    return (active_group,)
+    _common = [
+        name
+        for name, group in _groups.items()
+        if map_selected and all(well in group["wells"] for well in map_selected)
+    ]
+    active_group_picker = (
+        mo.ui.dropdown(_common, value=_common[0], label="Group")
+        if len(_common) > 1
+        else None
+    )
+    active_group = (
+        active_group_picker.value
+        if active_group_picker is not None
+        else (_common[0] if _common else None)
+    )
+    return active_group, active_group_picker
 
 
 @app.cell
-def _(active_group, get_map, mo, notes_store, pending, set_map, set_msg):
+def _(active_group, active_group_picker, get_map, mo, notes_store, pending, set_map, set_msg):
     # Click a group on the map -> a box opens here with that group's notes, ready to edit.
     # Notes also save themselves when you click out of the box.
     import html as _html
@@ -743,59 +760,15 @@ def _(active_group, get_map, mo, notes_store, pending, set_map, set_msg):
             f"<span style='color:{_g['color']}'>&#9679;</span> <b>{_html.escape(_name)}</b>"
             f" &nbsp;&middot;&nbsp; {len(_g['wells'])} wells"
         )
-        _panel = mo.callout(mo.vstack([_head, _box, _save_btn]), kind="neutral")
+        _contents = [_head]
+        if active_group_picker is not None:
+            _contents.append(active_group_picker)
+        _contents.extend([_box, _save_btn])
+        _panel = mo.callout(mo.vstack(_contents), kind="neutral")
     else:
         _panel = mo.md("")
     notes_panel = _panel
     return (notes_panel,)
-
-
-@app.cell
-def _(get_map, get_overlaps, mo, notes_store, pending, set_map, set_msg, set_overlaps):
-    # When two groups overlap, the shared wells become a new group. It already exists (with a
-    # placeholder name and a blend of the two colors); this box lets you name it and add notes.
-    import html as _html
-
-    _groups = get_map()
-    _queue = [n for n in get_overlaps() if n in _groups]
-    if _queue:
-        _key = _queue[0]
-        _g = _groups[_key]
-        _a, _b = pending["overlaps"].get(_key, ("?", "?"))
-        _shown = ", ".join(_g["wells"][:12]) + (" ..." if len(_g["wells"]) > 12 else "")
-        _more = f" ({len(_queue) - 1} more to name after this one)" if len(_queue) > 1 else ""
-        _text = mo.Html(
-            f"<span style='color:{_g['color']}'>&#9679;</span> <b>{_html.escape(_a)}</b> and "
-            f"<b>{_html.escape(_b)}</b> overlap at <b>{len(_g['wells'])} wells</b> "
-            f"({_html.escape(_shown)}). Those wells are now their own group, shown in a blend of both "
-            f"colors. Give it a name and notes:{_more}"
-        )
-        _name_box = mo.ui.text(value=_key, label="Group name", full_width=True)
-        _notes_box = mo.ui.text_area(
-            value=notes_store.get(_key, ""), label="Notes", rows=3, full_width=True,
-            placeholder="Notes for the overlapping wells...",
-        )
-
-        def _confirm(_):
-            _new = _name_box.value.strip() or _key
-            _taken = {k for k in _groups if k != _key}
-            _base, _i = _new, 2
-            while _new in _taken:  # never clash with an existing group name
-                _new = f"{_base} ({_i})"
-                _i += 1
-            _note = _notes_box.value.strip()
-            notes_store.pop(_key, None)
-            if _note:
-                notes_store[_new] = _note
-            set_overlaps(lambda q: [n for n in q if n != _key])
-            set_map(lambda g: {(_new if k == _key else k): v for k, v in g.items()})
-            set_msg(f"Created group \u201c{_new}\u201d \u2713")
-
-        _btn = mo.ui.button(label="Create group", kind="success", on_click=_confirm)
-        map_overlap_prompt = mo.callout(mo.vstack([_text, _name_box, _notes_box, _btn]), kind="info")
-    else:
-        map_overlap_prompt = mo.md("")
-    return (map_overlap_prompt,)
 
 
 @app.cell
@@ -838,11 +811,13 @@ def _(get_map, home_plate, map_inputs, map_selected, map_wells, mo, pending, pl)
         _hint = mo.md(f"**Invalid wells:** {_err}")
     elif _wells:
         _mine = map_inputs["name"].value.strip()
-        _owned = {w for k, g in get_map().items() if k != _mine for w in g["wells"]}
-        _shared = [w for w in _wells if w in _owned]
         _txt = f"**{len(_wells)} wells** ready to add. Press the green button to put them in a group."
+        _shared = sum(
+            any(name != _mine and well in group["wells"] for name, group in get_map().items())
+            for well in _wells
+        )
         if _shared:
-            _txt += f" {len(_shared)} of them already belong to another group, so they'll become a new overlap group."
+            _txt += f" {_shared} already belong to other groups; they will remain in those groups too."
         _hint = mo.md(_txt)
     else:
         _hint = mo.md("")
@@ -851,7 +826,7 @@ def _(get_map, home_plate, map_inputs, map_selected, map_wells, mo, pending, pl)
 
 
 @app.cell
-def _(get_map, get_msg, map_inputs, merge_group, mo, notes_store, pending, pl, set_map, set_msg, set_overlaps):
+def _(get_map, get_msg, map_inputs, merge_group, mo, notes_store, pending, pl, set_map, set_msg):
     # The Add button (bottom of the form) and the list of groups made so far.
     import html as _html
 
@@ -874,20 +849,11 @@ def _(get_map, get_msg, map_inputs, merge_group, mo, notes_store, pending, pl, s
                 for _n, _b in pending["boxes"].items():
                     if _n in _groups_now:
                         notes_store[_n] = (_b.value or "").strip()
-                _result, _overlaps, _dropped = merge_group(get_map(), _name, _wells, _color)
-                for _d in _dropped:
-                    notes_store.pop(_d, None)
+                _result = merge_group(get_map(), _name, _wells, _color)
                 if _note and _name in _result:  # a blank box keeps any notes the group already has
                     notes_store[_name] = _note
-                for _o in _overlaps:
-                    pending["overlaps"][_o["name"]] = (_o["a"], _o["b"])
                 set_map(_result)
-                set_overlaps(lambda q: [n for n in q if n in _result] + [o["name"] for o in _overlaps])
-                if _overlaps:
-                    _made = ", ".join(f"\u201c{o['name']}\u201d" for o in _overlaps)
-                    set_msg(f"Overlap found. New group(s) {_made} created from the shared wells: name them above.")
-                else:
-                    set_msg(f"Added {len(_wells)} wells to \u201c{_name}\u201d \u2713")
+                set_msg(f"Added {len(_wells)} wells to \u201c{_name}\u201d \u2713")
             elif _note and _name in _groups_now:
                 # No wells chosen: just save the notes onto the existing group with this name.
                 notes_store[_name] = _note
@@ -901,7 +867,7 @@ def _(get_map, get_msg, map_inputs, merge_group, mo, notes_store, pending, pl, s
     _add_button = mo.ui.button(label="Add selected wells to group", kind="success", on_click=_add)
     _clear_button = mo.ui.button(
         label="Clear all groups",
-        on_click=lambda v: (notes_store.clear(), set_msg(""), set_overlaps([]), set_map({})),
+        on_click=lambda v: (notes_store.clear(), set_msg(""), set_map({})),
     )
 
     _rows = []
@@ -1003,12 +969,6 @@ def _(MAPNOTES, map_picker_view, mo, page):
 @app.cell
 def _(MAPNOTES, mo, notes_panel, page):
     notes_panel if page == MAPNOTES else mo.md("")
-    return
-
-
-@app.cell
-def _(MAPNOTES, map_overlap_prompt, mo, page):
-    map_overlap_prompt if page == MAPNOTES else mo.md("")
     return
 
 

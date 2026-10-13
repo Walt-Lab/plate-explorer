@@ -135,29 +135,40 @@ def layout_from_file(path: str | Path, n_wells: int = 96) -> pd.DataFrame:
 
 
 def assign_wells(groups: dict, name: str, wells: list[str], color: str | None = None) -> dict:
-    """Return a new groups dict with the selected wells assigned to a named group."""
-    groups = dict(groups)
+    """Return a new groups dict with the selected wells added to a named group."""
     wells = [well_name(*parse_well(w)) for w in wells]
     if not name or not wells:
-        return groups
-    # Keep notes already saved under this name (the loop below can drop the group first).
-    notes = groups.get(name, {}).get("notes", "")
-    seen = set()
-    for key, info in list(groups.items()):
-        info = dict(info)
-        kept = [w for w in info.get("wells", []) if w not in wells]
-        if kept:
-            info["wells"] = kept
-            groups[key] = info
-        else:
-            groups.pop(key, None)
-        seen.update(kept)
-    groups[name] = {
-        "wells": sorted(set(wells), key=lambda w: (parse_well(w)[0], parse_well(w)[1])),
-        "color": color or PALETTE[0],
-        "notes": notes,
+        return dict(groups)
+    updated = {key: dict(info) for key, info in groups.items()}
+    current = updated.get(name, {})
+    updated[name] = {
+        **current,
+        "wells": sorted(
+            set(current.get("wells", [])) | set(wells),
+            key=lambda w: (parse_well(w)[0], parse_well(w)[1]),
+        ),
+        "color": color or current.get("color") or PALETTE[0],
+        "notes": current.get("notes", ""),
     }
-    return groups
+    return updated
+
+
+def update_group_wells(groups: dict, name: str, wells: list[str], action: str) -> dict:
+    """Add wells to or remove wells from an existing group."""
+    if name not in groups:
+        raise ValueError(f"Unknown group: {name!r}")
+    if action not in {"add", "remove"}:
+        raise ValueError("action must be 'add' or 'remove'.")
+    wells = list(dict.fromkeys(well_name(*parse_well(well)) for well in wells))
+    if not wells:
+        return groups
+    updated = {key: dict(info) for key, info in groups.items()}
+    group = updated[name]
+    current = list(group.get("wells", []))
+    if action == "remove":
+        group["wells"] = [well for well in current if well not in wells]
+        return updated
+    return assign_wells(updated, name, current + wells, group.get("color"))
 
 
 def remove_group(groups: dict, name: str) -> dict:
@@ -206,19 +217,42 @@ def layout_from_groups(groups: dict, n_wells: int = 96) -> pd.DataFrame:
 
 
 def plate_table(n_wells: int = 96, groups: dict | None = None) -> pd.DataFrame:
-    """Return a plate-like table with one row per well and assigned group label."""
+    """Return a plate-like table with each well's group memberships and display color."""
     groups = groups or {}
     nr, nc = plate_shape(n_wells)
     rows = []
     for row in range(nr):
         for col in range(nc):
             well = well_name(row, col)
-            group = "(unassigned)"
-            for name, info in groups.items():
-                if well in info.get("wells", []):
-                    group = name
-                    break
-            rows.append({"well": well, "row": row, "col": col, "group": group})
+            memberships = [
+                name for name, info in groups.items() if well in info.get("wells", [])
+            ]
+            if not memberships:
+                group, group_color = "(unassigned)", "#bbbbbb"
+            else:
+                group = ", ".join(memberships)
+                colors = [
+                    [
+                        int(groups[name].get("color", PALETTE[0])[i : i + 2], 16)
+                        for i in (1, 3, 5)
+                    ]
+                    for name in memberships
+                ]
+                channels = [
+                    sum(color[k] for color in colors)
+                    // len(memberships)
+                    for k in range(3)
+                ]
+                group_color = "#{:02x}{:02x}{:02x}".format(*channels)
+            rows.append(
+                {
+                    "well": well,
+                    "row": row,
+                    "col": col,
+                    "group": group,
+                    "group_color": group_color,
+                }
+            )
     return pd.DataFrame(rows)
 
 
@@ -597,8 +631,8 @@ def summarize(df: pd.DataFrame, by=("sample", "time")) -> pd.DataFrame:
     return out
 
 
-def summarize_curves(df: pd.DataFrame) -> pd.DataFrame:
-    """Summarize the values making up each group's curve."""
+def summarize_group_values(df: pd.DataFrame) -> pd.DataFrame:
+    """Summarize the measured values belonging to each group."""
     if df.empty:
         return pd.DataFrame(columns=["sample", "mean", "median", "std"])
     return (
@@ -606,6 +640,11 @@ def summarize_curves(df: pd.DataFrame) -> pd.DataFrame:
         .agg(mean="mean", median="median", std="std")
         .reset_index()
     )
+
+
+def summarize_curves(df: pd.DataFrame) -> pd.DataFrame:
+    """Backward-compatible alias for `summarize_group_values`."""
+    return summarize_group_values(df)
 
 
 # --------------------------------------------------------------------------- plots
