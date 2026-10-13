@@ -7,7 +7,9 @@ Reusable plate-data analysis: pandas + numpy + matplotlib, with an interactive m
 pip install -r requirements.txt
 marimo edit plate_app.py      # or: marimo run plate_app.py
 ```
-Leave the file box blank to try the built-in demo data.
+Upload one CSV/Excel file on the Home page. Its filename is shown on both the Home and Grouping-based spectra pages; uploading another file replaces the current file for the session.
+The Tecan workbook importer detects kinetics, wavelength scans, and endpoint plate scans from their table structure. Endpoint plate scans default to a heatmap; kinetic and wavelength-scan data default to curves. Other vendor/export layouts may need additional format support.
+The Grouping-based spectra curve view also shows a compact mean, median, and standard deviation summary for each group, with absolute pairwise differences when multiple groups are present.
 
 ## Plate layout
 One sample per line, `Name: wells`. Ranges are rectangles; combine with commas.
