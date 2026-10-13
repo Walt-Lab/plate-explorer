@@ -74,8 +74,8 @@ def _(mo, pl, upload):
 
     _options = _local_files + _uploaded_labels
     _default = _uploaded_labels[0] if _uploaded_labels else (_local_files[0] if _local_files else None)
-    source = mo.ui.dropdown(_options, value=_default, label="Data file")
-    group_source = mo.ui.dropdown(_options, value=_default, label="Data file")
+    source = mo.ui.dropdown(_options, value=_default, label="")
+    group_source = mo.ui.dropdown(_options, value=_default, label="")
 
     def resolve_file(selection):
         if selection in _local_files:
@@ -88,8 +88,26 @@ def _(mo, pl, upload):
             )
         return ""
 
-    home_controls = mo.hstack([source, upload], justify="start")
-    return group_source, home_controls, resolve_file, source
+    return group_source, resolve_file, source
+
+
+@app.cell
+def _(group_source, mo, source, upload):
+    home_file_label = mo.md(
+        f"**Data file:** {source.value.removeprefix('Uploaded: ') if source.value else 'None selected'}"
+    )
+    group_file_control = mo.hstack(
+        [
+            mo.md(
+                f"**Data file:** {group_source.value.removeprefix('Uploaded: ') if group_source.value else 'None selected'}"
+            ),
+            group_source,
+        ],
+        justify="start",
+        align="center",
+    )
+    home_controls = mo.hstack([home_file_label, source, upload], justify="start", align="center")
+    return group_file_control, home_controls
 
 
 @app.cell
@@ -885,8 +903,8 @@ def _(HOME, mo, page, workbook_summary):
 
 
 @app.cell
-def _(GROUPING, group_source, mo, page):
-    group_source if page == GROUPING else mo.md("")
+def _(GROUPING, group_file_control, mo, page):
+    group_file_control if page == GROUPING else mo.md("")
     return
 
 
