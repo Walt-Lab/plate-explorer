@@ -489,6 +489,33 @@ def summarize(df: pd.DataFrame, by=("sample", "time")) -> pd.DataFrame:
     return out
 
 
+def summarize_curves(df: pd.DataFrame, x_label: str = "time") -> pd.DataFrame:
+    """Build per-x group statistics and pairwise differences between group statistics."""
+    if df.empty:
+        return pd.DataFrame(columns=[x_label])
+    stats = (
+        df.groupby(["time", "sample"], sort=True)["value"]
+        .agg(mean="mean", median="median", std="std")
+        .reset_index()
+    )
+    times = stats["time"].drop_duplicates().tolist()
+    samples = list(df["sample"].drop_duplicates())
+    result = pd.DataFrame({x_label: times})
+    curves = {}
+    for sample in samples:
+        curve = stats.loc[stats["sample"] == sample].set_index("time").reindex(times)
+        curves[sample] = curve
+        for metric in ("mean", "median", "std"):
+            result[f"{sample} — {metric.capitalize()}"] = curve[metric].to_numpy()
+    for first_index, first in enumerate(samples):
+        for second in samples[first_index + 1 :]:
+            for metric in ("mean", "median", "std"):
+                result[f"{metric.capitalize()} difference ({first} − {second})"] = (
+                    curves[first][metric].to_numpy() - curves[second][metric].to_numpy()
+                )
+    return result
+
+
 # --------------------------------------------------------------------------- plots
 def plot_plate_heatmap(df, n_wells=96, time=None, cmap="viridis"):
     d = endpoint(df, time)

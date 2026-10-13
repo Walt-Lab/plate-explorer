@@ -456,7 +456,17 @@ def _(df, get_groups, group_axis_label, group_data, group_data_error, group_plat
                 colors={name: g["color"] for name, g in get_groups().items()},
                 trace_mode=group_trace_mode.value,
             )
-            group_plot = group_fig
+            if group_plot_type.value == "curves":
+                _stats = pl.summarize_curves(df, x_label=group_axis_label)
+                group_plot = mo.vstack(
+                    [
+                        group_fig,
+                        mo.md("### Curve statistics"),
+                        mo.ui.table(_stats, show_download=True),
+                    ]
+                )
+            else:
+                group_plot = group_fig
         except Exception as exc:
             group_plot = mo.md(f"**Couldn't draw the plot:** {exc}")
     return group_fig, group_plot
