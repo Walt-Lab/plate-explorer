@@ -44,54 +44,192 @@ def _(mo):
 
 
 @app.cell
-def _(mo):
+def _(mo, pl):
     _files = sorted(
         f.name
         for f in (mo.notebook_dir() / "data").glob("*")
         if f.suffix.lower() in {".csv", ".xlsx", ".xls"}
     )
-    source = mo.ui.dropdown(_files, value=_files[0] if _files else None, label="Data file (from the data/ folder)")
+    source = mo.ui.dropdown(_files, value=_files[0] if _files else None, label="Data file")
     upload = mo.ui.file(filetypes=[".csv", ".xlsx", ".xls"], label="...or upload a file")
-    fmt = mo.ui.dropdown(["spectra", "long", "wide", "matrix"], value="spectra", label="Data format")
-    plate = mo.ui.dropdown({"96-well": 96, "384-well": 384}, value="384-well", label="Plate")
-    home_controls = mo.vstack(
-        [
-            mo.hstack([source, upload], justify="start"),
-            mo.hstack([fmt, plate], justify="start"),
-        ]
-    )
-    return fmt, home_controls, plate, source, upload
+    home_plate = mo.ui.dropdown({"96-well": 96, "384-well": 384}, value="384-well", label="Plate")
+    group_plate = mo.ui.dropdown({"96-well": 96, "384-well": 384}, value="384-well", label="Plate")
+    home_controls = mo.hstack([source, upload], justify="start")
+    return group_plate, home_controls, home_plate, source, upload
 
 
 @app.cell
 def _(mo, pl, source, upload):
     if upload.value:
         _up = upload.value[0]
-        _path = pl.to_readable(_up.name, _up.contents)
+        home_path = pl.to_readable(_up.name, _up.contents)
     else:
-        _path = str(mo.notebook_dir() / "data" / source.value) if source.value else ""
-    _sheets = pl.excel_sheet_names(_path) if _path else [""]
-    sheet = mo.ui.dropdown(_sheets, value=_sheets[0], label="Excel sheet")
-    sheet_view = mo.hstack([sheet], justify="start")
-    return sheet, sheet_view
+        home_path = str(mo.notebook_dir() / "data" / source.value) if source.value else ""
+
+    _sheet_names = []
+    _overview_rows = []
+    for _sheet_name in pl.excel_sheet_names(home_path) if home_path else []:
+        _names = pl.tecan_measurement_names(home_path, sheet_name=_sheet_name)
+        if not _names:
+            continue
+        _sheet_names.append(_sheet_name)
+        _types = {
+            "Kinetics": [name for name in _names if name == "Kinetic measurement"],
+            "Absorbance": [name for name in _names if name.lower().startswith("abs")],
+            "Emission": [name for name in _names if name.lower().startswith("em")],
+        }
+        _summary = [
+            f"{kind} ({', '.join(names)})"
+            for kind, names in _types.items()
+            if names
+        ]
+        _overview_rows.append((_sheet_name or "Uploaded data", ", ".join(_summary)))
+
+    home_sheet = mo.ui.dropdown(
+        _sheet_names,
+        value=_sheet_names[0] if _sheet_names else None,
+        label="Sheet",
+    )
+
+    if _overview_rows:
+        _contents = "\n".join(
+            f"- **{sheet_name}:** {data_types}"
+            for sheet_name, data_types in _overview_rows
+        )
+        workbook_summary = mo.md(f"**Workbook contents**\n\n{_contents}")
+    elif home_path:
+        workbook_summary = mo.md("**Workbook contents**\n\nNo supported measurements found.")
+    else:
+        workbook_summary = mo.md("")
+    return home_path, home_sheet, workbook_summary
 
 
 @app.cell
-def _(fmt, mo, pl, sheet, source, upload):
-    # `data` = raw import: a normal pandas DataFrame you can use in any new cell.
+def _(mo, upload):
+    _files = sorted(
+        f.name
+        for f in (mo.notebook_dir() / "data").glob("*")
+        if f.suffix.lower() in {".csv", ".xlsx", ".xls"}
+    )
+    _options = {name: name for name in _files}
     if upload.value:
-        _up = upload.value[0]
-        _src = pl.to_readable(_up.name, _up.contents)
+        _uploaded_name = upload.value[0].name
+        _options[f"Uploaded: {_uploaded_name}"] = "__uploaded__"
+        _default = "__uploaded__"
     else:
-        _src = str(mo.notebook_dir() / "data" / source.value) if source.value else ""
-    _kw = {"sheet_name": sheet.value} if sheet.value else {}
-    try:
-        data = pl.load_data(_src, fmt=fmt.value, **_kw) if _src else None
-        data_error = ""
-    except Exception as exc:  # show the problem on the Home page instead of blanking every page
-        data = None
-        data_error = str(exc)
-    return data, data_error
+        _default = next(iter(_options.values()), None)
+    group_source = mo.ui.dropdown(
+        _options,
+        value=next(
+            (label for label, value in _options.items() if value == _default),
+            None,
+        ),
+        label="Data file",
+    )
+    return (group_source,)
+
+
+@app.cell
+def _(group_source, mo, pl, upload):
+    if group_source.value == "__uploaded__" and upload.value:
+        _up = upload.value[0]
+        group_path = pl.to_readable(_up.name, _up.contents)
+    elif group_source.value:
+        group_path = mo.notebook_dir() / "data" / group_source.value
+    else:
+        group_path = ""
+
+    _sheet_names = []
+    _overview_rows = []
+    for _sheet_name in pl.excel_sheet_names(group_path) if group_path else []:
+        _names = pl.tecan_measurement_names(group_path, sheet_name=_sheet_name)
+        if not _names:
+            continue
+        _sheet_names.append(_sheet_name)
+        _types = {
+            "Kinetics": [name for name in _names if name == "Kinetic measurement"],
+            "Absorbance": [name for name in _names if name.lower().startswith("abs")],
+            "Emission": [name for name in _names if name.lower().startswith("em")],
+        }
+        _summary = [
+            f"{kind} ({', '.join(names)})"
+            for kind, names in _types.items()
+            if names
+        ]
+        _overview_rows.append((_sheet_name or "Uploaded data", ", ".join(_summary)))
+    group_sheet = mo.ui.dropdown(
+        _sheet_names,
+        value=_sheet_names[0] if _sheet_names else None,
+        label="Sheet",
+    )
+    if _overview_rows:
+        _contents = "\n".join(
+            f"- **{sheet_name}:** {data_types}"
+            for sheet_name, data_types in _overview_rows
+        )
+        group_workbook_summary = mo.md(f"**Workbook contents**\n\n{_contents}")
+    elif group_path:
+        group_workbook_summary = mo.md("**Workbook contents**\n\nNo supported measurements found.")
+    else:
+        group_workbook_summary = mo.md("")
+    return group_path, group_sheet, group_workbook_summary
+
+
+@app.cell
+def _(group_path, group_sheet, home_path, home_sheet, mo, pl):
+    def _make_data_selector(path, sheet):
+        _names = pl.tecan_measurement_names(path, sheet_name=sheet.value) if path and sheet.value else []
+        _options = {}
+        for _name in _names:
+            if _name == "Kinetic measurement":
+                _kind = "Kinetics"
+            elif _name.lower().startswith("abs"):
+                _kind = "Absorbance"
+            elif _name.lower().startswith("em"):
+                _kind = "Emission"
+            else:
+                _kind = "Data"
+            _options[f"{_kind} — {_name}"] = _name
+        return mo.ui.dropdown(
+            _options,
+            value=next(iter(_options), None),
+            label="Data",
+        )
+
+    home_data_choice = _make_data_selector(home_path, home_sheet)
+    group_data_choice = _make_data_selector(group_path, group_sheet)
+    return group_data_choice, home_data_choice
+
+
+@app.cell
+def _(group_data_choice, group_path, group_sheet, home_data_choice, home_path, home_sheet, mo, pl):
+    def _load_selected(path, sheet, selected_data):
+        _src = path
+        if not _src or not sheet.value:
+            return None, "", "time (s)"
+        if not selected_data.value:
+            return None, "No supported data was found on the selected sheet.", "time (s)"
+        try:
+            _loaded = pl.load_data(
+                _src,
+                fmt="tecan",
+                sheet_name=sheet.value,
+                measurement=selected_data.value,
+            )
+            return _loaded, "", _loaded.attrs.get("x_label", "time (s)")
+        except Exception as exc:
+            return None, str(exc), "time"
+
+    home_data, home_data_error, home_axis_label = _load_selected(home_path, home_sheet, home_data_choice)
+    group_data, group_data_error, group_axis_label = _load_selected(group_path, group_sheet, group_data_choice)
+    return (
+        group_axis_label,
+        group_data,
+        group_data_error,
+        home_axis_label,
+        home_data,
+        home_data_error,
+    )
 
 
 @app.cell
@@ -106,25 +244,25 @@ def _(get_groups, mo, pl):
 
 
 @app.cell
-def _(alt, data, get_groups, mo, pl, plate):
+def _(alt, get_groups, group_data, group_plate, mo, pl):
     # The virtual plate. Click or drag over wells to select them.
     # Fill color = each well's signal (heatmap, from the loaded data).
     # Ring color = group assignment. Dimmed = not currently selected.
     _groups = get_groups()
-    _table = pl.plate_table(plate.value, _groups).copy()
+    _table = pl.plate_table(group_plate.value, _groups).copy()
     _table["col"] = _table["col"].astype(int) + 1
     _table["row"] = _table["row"].astype(int) + 1
     _table["row_label"] = [chr(64 + int(r)) for r in _table["row"]]
 
-    if data is not None and not data.empty:
-        _times = data["time"].dropna()
-        _endpoint = data[data["time"] == _times.max()] if not _times.empty else data
+    if group_data is not None and not group_data.empty:
+        _times = group_data["time"].dropna()
+        _endpoint = group_data[group_data["time"] == _times.max()] if not _times.empty else group_data
         _vals = _endpoint.groupby("well", as_index=False)["value"].mean()
         _table = _table.merge(_vals, on="well", how="left")
     else:
         _table["value"] = float("nan")
 
-    _nr, _nc = pl.plate_shape(plate.value)
+    _nr, _nc = pl.plate_shape(group_plate.value)
     _cell = 34 if _nr <= 8 else 26
     _size = 700 if _nr <= 8 else 400
     _domain = ["(unassigned)"] + list(_groups)
@@ -172,7 +310,7 @@ def _(alt, data, get_groups, mo, pl, plate):
 
 
 @app.cell
-def _(get_groups, group_color, group_name, group_wells, mo, pl, picker, plate, set_groups):
+def _(get_groups, group_color, group_name, group_wells, group_plate, mo, pl, picker, set_groups):
     _sel = picker.value
     _wells = []
 
@@ -188,13 +326,13 @@ def _(get_groups, group_color, group_name, group_wells, mo, pl, picker, plate, s
         _wells = [r["well"] for r in _sel if isinstance(r, dict) and "well" in r]
 
     _wells = list(dict.fromkeys(_wells))
-    if len(_wells) == len(pl.all_wells(plate.value)):
+    if len(_wells) == len(pl.all_wells(group_plate.value)):
         _wells = []
 
     _well_error = ""
     if group_wells.value.strip():
         try:
-            _wells = pl.expand_wells(group_wells.value, plate.value)
+            _wells = pl.expand_wells(group_wells.value, group_plate.value)
         except ValueError as exc:
             _wells = []
             _well_error = str(exc)
@@ -230,43 +368,52 @@ def _(get_groups, group_color, group_name, group_wells, mo, pl, picker, plate, s
 
 
 @app.cell
-def _(data, get_groups, pl, plate):
+def _(get_groups, group_data, group_plate, home_data, home_plate, pl):
     # Two versions of the data, each joined to a well -> sample layout:
     #   layout_all / df_all : every well as one sample ("All wells")     -> Home page
     #   layout / df         : built from the groups you made             -> Grouping-based spectra
     # (`df` is empty until you've made at least one group.)
     import pandas as _pd
 
-    def _attach(lay):
+    def _attach(source_data, lay):
         try:
-            return pl.attach_layout(data, lay) if data is not None else _pd.DataFrame()
+            return pl.attach_layout(source_data, lay) if source_data is not None else _pd.DataFrame()
         except Exception:
             return _pd.DataFrame()
 
-    layout_all = pl.layout_from_groups({"All wells": {"wells": pl.all_wells(plate.value)}}, plate.value)
-    df_all = _attach(layout_all)
+    layout_all = pl.layout_from_groups({"All wells": {"wells": pl.all_wells(home_plate.value)}}, home_plate.value)
+    df_all = _attach(home_data, layout_all)
     _groups = get_groups()
-    layout = pl.layout_from_groups(_groups, plate.value) if _groups else layout_all
-    df = _attach(layout) if _groups else _pd.DataFrame()
+    layout = pl.layout_from_groups(_groups, group_plate.value) if _groups else pl.layout_from_groups(
+        {"All wells": {"wells": pl.all_wells(group_plate.value)}},
+        group_plate.value,
+    )
+    df = _attach(group_data, layout) if _groups else _pd.DataFrame()
     return df, df_all, layout, layout_all
 
 
 @app.cell
-def _(mo):
+def _(group_data_choice, group_plate, group_sheet, home_data_choice, home_plate, home_sheet, mo):
     plot_type = mo.ui.dropdown(["curves", "heatmap"], value="curves", label="Plot type")
-    plot_type_view = mo.hstack([plot_type], justify="start")
+    home_plot_controls = mo.hstack(
+        [home_sheet, home_data_choice, plot_type, home_plate],
+        justify="start",
+    )
     group_plot_type = mo.ui.dropdown(["curves", "heatmap"], value="curves", label="Plot type")
-    group_plot_type_view = mo.hstack([group_plot_type], justify="start")
-    return group_plot_type, group_plot_type_view, plot_type, plot_type_view
+    group_plot_controls = mo.hstack(
+        [group_sheet, group_data_choice, group_plot_type, group_plate],
+        justify="start",
+    )
+    return group_plot_controls, group_plot_type, home_plot_controls, plot_type
 
 
 @app.cell
-def _(data, data_error, df_all, fmt, mo, pl, plate, plot_type):
+def _(df_all, home_axis_label, home_data, home_data_error, home_plate, mo, pl, plot_type):
     # Home page plot: the whole plate, no grouping.
     fig = None
-    if data_error:
-        home_plot = mo.md(f"**Couldn't read that file:** {data_error}")
-    elif data is None:
+    if home_data_error:
+        home_plot = mo.md(f"**Couldn't read that file:** {home_data_error}")
+    elif home_data is None:
         home_plot = mo.md("Choose a data file (or upload one) to see the plot.")
     elif df_all.empty:
         home_plot = mo.md("None of the wells appear in this data file.")
@@ -279,8 +426,8 @@ def _(data, data_error, df_all, fmt, mo, pl, plate, plot_type):
                 facet=False,
                 err=None,
                 time=None,
-                n_wells=plate.value,
-                xlabel="wavelength (nm)" if fmt.value == "spectra" else "time",
+                n_wells=home_plate.value,
+                xlabel=home_axis_label,
                 colors={"All wells": pl.PALETTE[0]},
             )
             home_plot = fig
@@ -290,13 +437,13 @@ def _(data, data_error, df_all, fmt, mo, pl, plate, plot_type):
 
 
 @app.cell
-def _(data, data_error, df, fmt, get_groups, group_plot_type, mo, pl, plate):
+def _(df, get_groups, group_axis_label, group_data, group_data_error, group_plate, group_plot_type, mo, pl):
     # Grouping-based spectra plot: one trace per group you made, in the group's color.
     group_fig = None
-    if data_error:
-        group_plot = mo.md(f"**Couldn't read that file:** {data_error}")
-    elif data is None:
-        group_plot = mo.md("Choose a data file on the Home page to see group spectra.")
+    if group_data_error:
+        group_plot = mo.md(f"**Couldn't read that file:** {group_data_error}")
+    elif group_data is None:
+        group_plot = mo.md("Choose a data series to see grouped plots.")
     elif not get_groups():
         group_plot = mo.md("")
     elif df.empty:
@@ -310,8 +457,8 @@ def _(data, data_error, df, fmt, get_groups, group_plot_type, mo, pl, plate):
                 facet=False,
                 err=None,
                 time=None,
-                n_wells=plate.value,
-                xlabel="wavelength (nm)" if fmt.value == "spectra" else "time",
+                n_wells=group_plate.value,
+                xlabel=group_axis_label,
                 colors={name: g["color"] for name, g in get_groups().items()},
             )
             group_plot = group_fig
@@ -411,18 +558,18 @@ def _():
 
 
 @app.cell
-def _(alt, get_map, mo, notes_store, pl, plate):
+def _(alt, get_map, home_plate, mo, notes_store, pl):
     # The grouping map: same plate layout and click/drag selection as the plot picker,
     # but each well is filled with its group color (no signal values).
     # Hover over a well to see its group and that group's notes.
     _groups = get_map()
-    _table = pl.plate_table(plate.value, _groups).copy()
+    _table = pl.plate_table(home_plate.value, _groups).copy()
     _table["col"] = _table["col"].astype(int) + 1
     _table["row"] = _table["row"].astype(int) + 1
     _table["row_label"] = [chr(64 + int(r)) for r in _table["row"]]
     _table["notes"] = _table["group"].map({k: notes_store.get(k, "") for k in _groups}).fillna("")
 
-    _nr, _nc = pl.plate_shape(plate.value)
+    _nr, _nc = pl.plate_shape(home_plate.value)
     _cell = 34 if _nr <= 8 else 26
     _size = 700 if _nr <= 8 else 400
     _domain = ["(unassigned)"] + list(_groups)
@@ -464,7 +611,7 @@ def _(alt, get_map, mo, notes_store, pl, plate):
 
 
 @app.cell
-def _(map_picker, pl, plate):
+def _(home_plate, map_picker, pl):
     # Wells currently selected on the map by clicking/dragging (empty if nothing is selected).
     _sel = map_picker.value
     _wells = []
@@ -480,7 +627,7 @@ def _(map_picker, pl, plate):
         _wells = [r["well"] for r in _sel if isinstance(r, dict) and "well" in r]
     _wells = list(dict.fromkeys(_wells))
     # "Everything selected" just means nothing is selected.
-    if len(_wells) == len(pl.all_wells(plate.value)):
+    if len(_wells) == len(pl.all_wells(home_plate.value)):
         _wells = []
     map_selected = _wells
     return (map_selected,)
@@ -602,14 +749,14 @@ def _(get_map, mo, pl):
 
 
 @app.cell
-def _(get_map, map_inputs, map_selected, map_wells, mo, pending, pl, plate):
+def _(get_map, home_plate, map_inputs, map_selected, map_wells, mo, pending, pl):
     # Live hint under the notes box. Also works out which wells the Add button will use:
     # a range typed in "Wells" wins, otherwise whatever is selected on the plate.
     _wells = list(map_selected)
     _err = ""
     if map_wells.value.strip():
         try:
-            _wells = pl.expand_wells(map_wells.value, plate.value)
+            _wells = pl.expand_wells(map_wells.value, home_plate.value)
         except ValueError as exc:
             _wells = []
             _err = str(exc)
@@ -723,14 +870,32 @@ def _(HOME, home_controls, mo, page):
 
 
 @app.cell
-def _(HOME, mo, page, sheet_view):
-    sheet_view if page == HOME else mo.md("")
+def _(HOME, mo, page, workbook_summary):
+    workbook_summary if page == HOME else mo.md("")
     return
 
 
 @app.cell
-def _(HOME, mo, page, plot_type_view):
-    plot_type_view if page == HOME else mo.md("")
+def _(GROUPING, group_source, mo, page):
+    group_source if page == GROUPING else mo.md("")
+    return
+
+
+@app.cell
+def _(GROUPING, group_workbook_summary, mo, page):
+    group_workbook_summary if page == GROUPING else mo.md("")
+    return
+
+
+@app.cell
+def _(GROUPING, group_plot_controls, mo, page):
+    group_plot_controls if page == GROUPING else mo.md("")
+    return
+
+
+@app.cell
+def _(HOME, home_plot_controls, mo, page):
+    home_plot_controls if page == HOME else mo.md("")
     return
 
 
@@ -749,12 +914,6 @@ def _(GROUPING, mo, page, picker_view):
 @app.cell
 def _(GROUPING, group_ui, mo, page):
     group_ui if page == GROUPING else mo.md("")
-    return
-
-
-@app.cell
-def _(GROUPING, group_plot_type_view, mo, page):
-    group_plot_type_view if page == GROUPING else mo.md("")
     return
 
 

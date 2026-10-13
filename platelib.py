@@ -332,6 +332,110 @@ def load_spectra(src, **kw) -> pd.DataFrame:
     return _finish(long)
 
 
+def _tecan_spectral_sections(raw: pd.DataFrame) -> list[tuple[str, int]]:
+    sections = []
+    labels = []
+    for i, value in raw.iloc[:, 0].items():
+        text = str(value).strip()
+        if text.lower().startswith("label:"):
+            labels.append((i, text.split(":", 1)[1].strip() or f"Scan {len(labels) + 1}"))
+        if text.lower() != "wavel.":
+            continue
+        label = next((name for row, name in reversed(labels) if row < i), f"Scan {len(sections) + 1}")
+        if any(existing == label for existing, _ in sections):
+            label = f"{label} #{sum(existing.startswith(label) for existing, _ in sections) + 1}"
+        sections.append((label, i))
+    return sections
+
+
+def tecan_measurement_names(src, **kw) -> list[str]:
+    """List kinetic or spectral measurements available in a Tecan report sheet."""
+    raw = _read_table(src, header=None, **kw)
+    if raw.empty or raw.shape[1] == 0:
+        return []
+    if any(
+        re.fullmatch(r"time\s*\[s\]", str(value).strip(), flags=re.IGNORECASE)
+        for value in raw.iloc[:, 0]
+    ):
+        return ["Kinetic measurement"]
+    return [label for label, _ in _tecan_spectral_sections(raw)]
+
+
+def load_tecan(src, measurement=None, **kw) -> pd.DataFrame:
+    """Load a selected kinetic or wavelength-scan measurement from a Tecan report."""
+    raw = _read_table(src, header=None, **kw)
+    if raw.empty or raw.shape[1] == 0:
+        raise ValueError("The selected Tecan worksheet is empty.")
+    time_row = next(
+        (
+            i
+            for i, value in raw.iloc[:, 0].items()
+            if re.fullmatch(r"time\s*\[s\]", str(value).strip(), flags=re.IGNORECASE)
+        ),
+        None,
+    )
+    if time_row is not None:
+        selected = measurement or "Kinetic measurement"
+        if selected != "Kinetic measurement":
+            raise ValueError(f"Unknown Tecan measurement: {selected!r}")
+        times = pd.to_numeric(raw.iloc[time_row, 1:], errors="coerce")
+        well_rows = [
+            (i, str(value).strip().upper())
+            for i, value in raw.iloc[time_row + 1 :, 0].items()
+            if _WELL_RE.fullmatch(str(value).strip())
+        ]
+        rows = [
+            {"well": well, "time": time, "value": value, "measurement": selected}
+            for row_index, well in well_rows
+            for time, value in zip(
+                times,
+                pd.to_numeric(raw.iloc[row_index, 1 : len(times) + 1], errors="coerce"),
+            )
+            if pd.notna(time)
+        ]
+        if not rows:
+            raise ValueError("No kinetic well readings were found below the Tecan 'Time [s]' row.")
+        result = _finish(pd.DataFrame(rows))
+        result.attrs["x_label"] = "time (s)"
+        return result
+
+    sections = _tecan_spectral_sections(raw)
+    if not sections:
+        raise ValueError("Tecan report is missing a 'Time [s]' or 'Wavel.' measurement table.")
+    selected = measurement or sections[0][0]
+    section = next(((label, header) for label, header in sections if label == selected), None)
+    if section is None:
+        raise ValueError(f"Unknown Tecan measurement: {selected!r}")
+
+    label, header = section
+    wavelengths = pd.to_numeric(raw.iloc[header, 1:], errors="coerce")
+    end = next(
+        (i for i in range(header + 1, len(raw)) if str(raw.iloc[i, 0]).strip().lower() == "end time:"),
+        len(raw),
+    )
+    rows = []
+    for row_index in range(header + 1, end):
+        well_value = raw.iloc[row_index, 0]
+        if pd.isna(well_value) or not _WELL_RE.fullmatch(str(well_value).strip()):
+            continue
+        values = pd.to_numeric(raw.iloc[row_index, 1 : len(wavelengths) + 1], errors="coerce")
+        rows.extend(
+            {
+                "well": str(well_value).strip().upper(),
+                "time": wavelength,
+                "value": value,
+                "measurement": label,
+            }
+            for wavelength, value in zip(wavelengths, values)
+            if pd.notna(wavelength)
+        )
+    if not rows:
+        raise ValueError(f"No wavelength readings were found for Tecan measurement {label!r}.")
+    result = _finish(pd.DataFrame(rows))
+    result.attrs["x_label"] = "wavelength (nm)"
+    return result
+
+
 def load_wide(src, well="Well", **kw) -> pd.DataFrame:
     """Wells as rows, one column per time point (column headers = times)."""
     t = _read_table(src, **kw).rename(columns={well: "well"})
@@ -352,7 +456,13 @@ def load_matrix(src, **kw) -> pd.DataFrame:
 
 def load_data(src, fmt: str = "long", **kw) -> pd.DataFrame:
     fmt = (fmt or "long").lower()
-    return {"long": load_long, "spectra": load_spectra, "wide": load_wide, "matrix": load_matrix}[fmt](src, **kw)
+    return {
+        "long": load_long,
+        "spectra": load_spectra,
+        "wide": load_wide,
+        "matrix": load_matrix,
+        "tecan": load_tecan,
+    }[fmt](src, **kw)
 
 
 def attach_layout(data: pd.DataFrame, layout: pd.DataFrame) -> pd.DataFrame:

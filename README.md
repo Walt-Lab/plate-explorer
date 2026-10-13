@@ -7,7 +7,7 @@ Reusable plate-data analysis: pandas + numpy + matplotlib, with an interactive m
 pip install -r requirements.txt
 marimo edit plate_app.py      # or: marimo run plate_app.py
 ```
-Leave the file box blank to try the built-in demo data.
+Select a workbook from the `data/` folder or upload a CSV/Excel file.
 
 ## Plate layout
 One sample per line, `Name: wells`. Ranges are rectangles; combine with commas.
