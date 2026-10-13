@@ -44,27 +44,57 @@ def _(mo):
 
 
 @app.cell
-def _(mo, pl):
-    _files = sorted(
+def _(mo):
+    upload = mo.ui.file(
+        filetypes=[".csv", ".xlsx", ".xls"],
+        multiple=True,
+        label="...or upload files",
+    )
+    home_plate = mo.ui.dropdown({"96-well": 96, "384-well": 384}, value="384-well", label="Plate")
+    group_plate = mo.ui.dropdown({"96-well": 96, "384-well": 384}, value="384-well", label="Plate")
+    return group_plate, home_plate, upload
+
+
+@app.cell
+def _(mo, pl, upload):
+    _local_files = sorted(
         f.name
         for f in (mo.notebook_dir() / "data").glob("*")
         if f.suffix.lower() in {".csv", ".xlsx", ".xls"}
     )
-    source = mo.ui.dropdown(_files, value=_files[0] if _files else None, label="Data file")
-    upload = mo.ui.file(filetypes=[".csv", ".xlsx", ".xls"], label="...or upload a file")
-    home_plate = mo.ui.dropdown({"96-well": 96, "384-well": 384}, value="384-well", label="Plate")
-    group_plate = mo.ui.dropdown({"96-well": 96, "384-well": 384}, value="384-well", label="Plate")
+    _uploaded_files = list(upload.value or [])
+    _uploaded_labels = []
+    for _index, _file in enumerate(_uploaded_files):
+        _label = f"Uploaded: {_file.name}"
+        _suffix = 2
+        while _label in _local_files or _label in _uploaded_labels:
+            _label = f"Uploaded: {_file.name} ({_suffix})"
+            _suffix += 1
+        _uploaded_labels.append(_label)
+
+    _options = _local_files + _uploaded_labels
+    _default = _uploaded_labels[0] if _uploaded_labels else (_local_files[0] if _local_files else None)
+    source = mo.ui.dropdown(_options, value=_default, label="Data file")
+    group_source = mo.ui.dropdown(_options, value=_default, label="Data file")
+
+    def resolve_file(selection):
+        if selection in _local_files:
+            return mo.notebook_dir() / "data" / selection
+        if selection in _uploaded_labels:
+            _index = _uploaded_labels.index(selection)
+            return pl.to_readable(
+                _uploaded_files[_index].name,
+                _uploaded_files[_index].contents,
+            )
+        return ""
+
     home_controls = mo.hstack([source, upload], justify="start")
-    return group_plate, home_controls, home_plate, source, upload
+    return group_source, home_controls, resolve_file, source
 
 
 @app.cell
-def _(mo, pl, source, upload):
-    if upload.value:
-        _up = upload.value[0]
-        home_path = pl.to_readable(_up.name, _up.contents)
-    else:
-        home_path = str(mo.notebook_dir() / "data" / source.value) if source.value else ""
+def _(mo, pl, source, resolve_file):
+    home_path = resolve_file(source.value)
 
     _sheet_names = []
     _overview_rows = []
@@ -105,39 +135,8 @@ def _(mo, pl, source, upload):
 
 
 @app.cell
-def _(mo, upload):
-    _files = sorted(
-        f.name
-        for f in (mo.notebook_dir() / "data").glob("*")
-        if f.suffix.lower() in {".csv", ".xlsx", ".xls"}
-    )
-    _options = {name: name for name in _files}
-    if upload.value:
-        _uploaded_name = upload.value[0].name
-        _options[f"Uploaded: {_uploaded_name}"] = "__uploaded__"
-        _default = "__uploaded__"
-    else:
-        _default = next(iter(_options.values()), None)
-    group_source = mo.ui.dropdown(
-        _options,
-        value=next(
-            (label for label, value in _options.items() if value == _default),
-            None,
-        ),
-        label="Data file",
-    )
-    return (group_source,)
-
-
-@app.cell
-def _(group_source, mo, pl, upload):
-    if group_source.value == "__uploaded__" and upload.value:
-        _up = upload.value[0]
-        group_path = pl.to_readable(_up.name, _up.contents)
-    elif group_source.value:
-        group_path = mo.notebook_dir() / "data" / group_source.value
-    else:
-        group_path = ""
+def _(group_source, mo, pl, resolve_file):
+    group_path = resolve_file(group_source.value)
 
     _sheet_names = []
     _overview_rows = []
