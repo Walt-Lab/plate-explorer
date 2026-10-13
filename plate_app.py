@@ -371,7 +371,7 @@ def _(get_groups, group_color, group_name, group_wells, group_plate, mo, pl, pic
             ),
         )
         _rm = mo.ui.button(
-            label="Delete entire group",
+            label="Delete group",
             on_click=lambda v, n=_gname: set_groups(lambda g: pl.remove_group(g, n)),
         )
         _rows.append(
