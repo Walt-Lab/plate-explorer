@@ -91,12 +91,19 @@ def _(mo, pl, resolve_file):
         _sheet_names.append(_sheet_name)
         _types = {
             "Kinetics": [name for name in _names if name == "Kinetic measurement"],
-            "Absorbance": [name for name in _names if name.lower().startswith("abs")],
-            "Emission": [name for name in _names if name.lower().startswith("em")],
-            "Plate scan": [name for name in _names if name.lower().startswith(("scan", "plate scan"))],
+            "Absorbance": [name for name in _names if "absorb" in name.lower()],
+            "Emission": [name for name in _names if "emission" in name.lower()],
+            "Wavelength scan": [
+                name
+                for name in _names
+                if name.startswith("Wavelength scan —")
+                and "absorb" not in name.lower()
+                and "emission" not in name.lower()
+            ],
+            "Plate scan": [name for name in _names if name.startswith("Plate scan —")],
         }
         _summary = [
-            f"{kind} ({', '.join(names)})"
+            f"{kind} ({', '.join(name.split(' — ', 1)[-1] for name in names)})"
             for kind, names in _types.items()
             if names
         ]
@@ -134,12 +141,19 @@ def _(mo, pl, resolve_file):
         _sheet_names.append(_sheet_name)
         _types = {
             "Kinetics": [name for name in _names if name == "Kinetic measurement"],
-            "Absorbance": [name for name in _names if name.lower().startswith("abs")],
-            "Emission": [name for name in _names if name.lower().startswith("em")],
-            "Plate scan": [name for name in _names if name.lower().startswith(("scan", "plate scan"))],
+            "Absorbance": [name for name in _names if "absorb" in name.lower()],
+            "Emission": [name for name in _names if "emission" in name.lower()],
+            "Wavelength scan": [
+                name
+                for name in _names
+                if name.startswith("Wavelength scan —")
+                and "absorb" not in name.lower()
+                and "emission" not in name.lower()
+            ],
+            "Plate scan": [name for name in _names if name.startswith("Plate scan —")],
         }
         _summary = [
-            f"{kind} ({', '.join(names)})"
+            f"{kind} ({', '.join(name.split(' — ', 1)[-1] for name in names)})"
             for kind, names in _types.items()
             if names
         ]
@@ -170,15 +184,18 @@ def _(group_path, group_sheet, home_path, home_sheet, mo, pl):
         for _name in _names:
             if _name == "Kinetic measurement":
                 _kind = "Kinetics"
-            elif _name.lower().startswith("abs"):
+            elif "absorb" in _name.lower():
                 _kind = "Absorbance"
-            elif _name.lower().startswith("em"):
+            elif "emission" in _name.lower():
                 _kind = "Emission"
-            elif _name.lower().startswith(("scan", "plate scan")):
+            elif _name.startswith("Plate scan —"):
                 _kind = "Plate scan"
+            elif _name.startswith("Wavelength scan —"):
+                _kind = "Wavelength scan"
             else:
                 _kind = "Data"
-            _options[f"{_kind} — {_name}"] = _name
+            _display_name = _name.split(" — ", 1)[-1]
+            _options[f"{_kind} — {_display_name}"] = _name
         return mo.ui.dropdown(
             _options,
             value=next(iter(_options), None),
@@ -386,7 +403,7 @@ def _(group_data_choice, group_plate, group_sheet, home_data_choice, home_plate,
     _home_plot_default = (
         "heatmap"
         if home_data_choice.value
-        and home_data_choice.value.lower().startswith(("scan", "plate scan"))
+        and home_data_choice.value.startswith("Plate scan —")
         else "curves"
     )
     plot_type = mo.ui.dropdown(
@@ -401,7 +418,7 @@ def _(group_data_choice, group_plate, group_sheet, home_data_choice, home_plate,
     _group_plot_default = (
         "heatmap"
         if group_data_choice.value
-        and group_data_choice.value.lower().startswith(("scan", "plate scan"))
+        and group_data_choice.value.startswith("Plate scan —")
         else "curves"
     )
     group_plot_type = mo.ui.dropdown(

@@ -363,7 +363,7 @@ def _tecan_plate_scans(raw: pd.DataFrame) -> list[tuple[str, int]]:
             for column, value in enumerate(raw.iloc[index, 1:], start=1)
             if pd.notna(number := pd.to_numeric(value, errors="coerce"))
             and float(number).is_integer()
-            and number > 0
+            and 1 <= number <= 24
         ]
         if len(columns) < 2:
             continue
@@ -397,16 +397,24 @@ def tecan_measurement_names(src, **kw) -> list[str]:
     raw = _read_table(src, header=None, **kw)
     if raw.empty or raw.shape[1] == 0:
         return []
-    measurements = [(label, header) for label, header in _tecan_spectral_sections(raw)]
-    measurements.extend(_tecan_plate_scans(raw))
-    if any(
-        re.fullmatch(r"time\s*\[s\]", str(value).strip(), flags=re.IGNORECASE)
-        for value in raw.iloc[:, 0]
-    ):
-        measurements.append(("Kinetic measurement", next(
-            i for i, value in raw.iloc[:, 0].items()
+    measurements = [
+        (f"Wavelength scan — {label}", header)
+        for label, header in _tecan_spectral_sections(raw)
+    ]
+    measurements.extend(
+        (f"Plate scan — {label}", header)
+        for label, header in _tecan_plate_scans(raw)
+    )
+    kinetic_row = next(
+        (
+            i
+            for i, value in raw.iloc[:, 0].items()
             if re.fullmatch(r"time\s*\[s\]", str(value).strip(), flags=re.IGNORECASE)
-        )))
+        ),
+        None,
+    )
+    if kinetic_row is not None:
+        measurements.append(("Kinetic measurement", kinetic_row))
     return [name for name, _ in sorted(measurements, key=lambda item: item[1])]
 
 
@@ -447,7 +455,14 @@ def load_tecan(src, measurement=None, **kw) -> pd.DataFrame:
         return result
 
     scans = _tecan_plate_scans(raw)
-    scan = next(((label, header) for label, header in scans if label == selected), None)
+    scan = next(
+        (
+            (label, header)
+            for label, header in scans
+            if selected in {label, f"Plate scan — {label}"}
+        ),
+        None,
+    )
     if scan is not None:
         label, header = scan
         columns = [
@@ -490,7 +505,14 @@ def load_tecan(src, measurement=None, **kw) -> pd.DataFrame:
     if not sections:
         raise ValueError("Tecan report is missing a supported kinetic, spectral, or plate-scan table.")
     selected = selected or sections[0][0]
-    section = next(((label, header) for label, header in sections if label == selected), None)
+    section = next(
+        (
+            (label, header)
+            for label, header in sections
+            if selected in {label, f"Wavelength scan — {label}"}
+        ),
+        None,
+    )
     if section is None:
         raise ValueError(f"Unknown Tecan measurement: {selected!r}")
 
