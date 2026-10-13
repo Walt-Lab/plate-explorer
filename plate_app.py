@@ -24,7 +24,7 @@ def _(mo):
     HOME = "Data overview"
     GROUPING = "Grouping-based spectra"
     MAPNOTES = "Grouping map & notes"
-    nav = mo.ui.tabs({MAPNOTES: mo.md(""), HOME: mo.md(""), GROUPING: mo.md("")})
+    nav = mo.ui.tabs({HOME: mo.md(""), MAPNOTES: mo.md(""), GROUPING: mo.md("")})
     mo.vstack([mo.md("# Plate explorer"), nav])
     return GROUPING, HOME, MAPNOTES, nav
 
@@ -32,7 +32,7 @@ def _(mo):
 @app.cell
 def _(GROUPING, HOME, MAPNOTES, nav):
     # Name of the page whose button is selected (falls back to the first tab).
-    page = nav.value if nav.value in (HOME, GROUPING, MAPNOTES) else MAPNOTES
+    page = nav.value if nav.value in (HOME, GROUPING, MAPNOTES) else HOME
     return (page,)
 
 
@@ -71,9 +71,14 @@ def _(mo, pl, upload):
 
 
 @app.cell
-def _(mo, upload, file_name):
+def _(home_plate, mo, upload, file_name):
     data_file_label = mo.md(f"**Data file:** {file_name}")
-    home_controls = mo.hstack([upload, data_file_label], justify="start", align="center")
+    home_controls = mo.hstack(
+        [upload, home_plate, data_file_label],
+        justify="start",
+        align="center",
+        wrap=True,
+    )
     group_file_label = mo.md(f"**Data file:** {file_name}")
     return group_file_label, home_controls
 
@@ -450,7 +455,7 @@ def _(group_data_choice, group_plate, group_sheet, home_data_choice, home_plate,
         label="Plot type",
     )
     home_plot_controls = mo.hstack(
-        [home_sheet, home_data_choice, plot_type, home_plate],
+        [home_sheet, home_data_choice, plot_type],
         justify="start",
     )
     _group_plot_default = (
