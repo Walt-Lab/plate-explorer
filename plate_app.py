@@ -406,7 +406,7 @@ def _(group_data_choice, group_plate, group_sheet, home_data_choice, home_plate,
             "Individual wells": "individual",
             "Average + individual": "both",
         },
-        value="average",
+        value="Average",
         label="Trace display (curves)",
     )
     group_plot_controls = mo.hstack(
