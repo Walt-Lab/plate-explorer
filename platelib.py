@@ -349,21 +349,69 @@ def _tecan_spectral_sections(raw: pd.DataFrame) -> list[tuple[str, int]]:
     return sections
 
 
+def _tecan_plate_scans(raw: pd.DataFrame) -> list[tuple[str, int]]:
+    labels = []
+    sections = []
+    for index, value in raw.iloc[:, 0].items():
+        text = str(value).strip()
+        if text.lower().startswith("label:"):
+            labels.append((index, text.split(":", 1)[1].strip()))
+        if text != "<>":
+            continue
+        columns = [
+            (column, int(number))
+            for column, value in enumerate(raw.iloc[index, 1:], start=1)
+            if pd.notna(number := pd.to_numeric(value, errors="coerce"))
+            and float(number).is_integer()
+            and number > 0
+        ]
+        if len(columns) < 2:
+            continue
+        end = next(
+            (
+                row
+                for row in range(index + 1, len(raw))
+                if str(raw.iloc[row, 0]).strip().lower() == "end time:"
+            ),
+            len(raw),
+        )
+        well_rows = [
+            row
+            for row in range(index + 1, end)
+            if re.fullmatch(r"[A-P]", str(raw.iloc[row, 0]).strip(), flags=re.IGNORECASE)
+        ]
+        if len(well_rows) < 2:
+            continue
+        label = next(
+            (name for row, name in reversed(labels) if row < index and name),
+            f"Plate scan {len(sections) + 1}",
+        )
+        if any(existing == label for existing, _ in sections):
+            label = f"{label} #{sum(existing.startswith(label) for existing, _ in sections) + 1}"
+        sections.append((label, index))
+    return sections
+
+
 def tecan_measurement_names(src, **kw) -> list[str]:
-    """List kinetic or spectral measurements available in a Tecan report sheet."""
+    """List kinetic, spectral, and endpoint plate-scan measurements in a Tecan sheet."""
     raw = _read_table(src, header=None, **kw)
     if raw.empty or raw.shape[1] == 0:
         return []
+    measurements = [(label, header) for label, header in _tecan_spectral_sections(raw)]
+    measurements.extend(_tecan_plate_scans(raw))
     if any(
         re.fullmatch(r"time\s*\[s\]", str(value).strip(), flags=re.IGNORECASE)
         for value in raw.iloc[:, 0]
     ):
-        return ["Kinetic measurement"]
-    return [label for label, _ in _tecan_spectral_sections(raw)]
+        measurements.append(("Kinetic measurement", next(
+            i for i, value in raw.iloc[:, 0].items()
+            if re.fullmatch(r"time\s*\[s\]", str(value).strip(), flags=re.IGNORECASE)
+        )))
+    return [name for name, _ in sorted(measurements, key=lambda item: item[1])]
 
 
 def load_tecan(src, measurement=None, **kw) -> pd.DataFrame:
-    """Load a selected kinetic or wavelength-scan measurement from a Tecan report."""
+    """Load a selected kinetic, wavelength-scan, or endpoint plate-scan measurement."""
     raw = _read_table(src, header=None, **kw)
     if raw.empty or raw.shape[1] == 0:
         raise ValueError("The selected Tecan worksheet is empty.")
@@ -375,10 +423,8 @@ def load_tecan(src, measurement=None, **kw) -> pd.DataFrame:
         ),
         None,
     )
-    if time_row is not None:
-        selected = measurement or "Kinetic measurement"
-        if selected != "Kinetic measurement":
-            raise ValueError(f"Unknown Tecan measurement: {selected!r}")
+    selected = measurement or ("Kinetic measurement" if time_row is not None else None)
+    if selected == "Kinetic measurement" and time_row is not None:
         times = pd.to_numeric(raw.iloc[time_row, 1:], errors="coerce")
         well_rows = [
             (i, str(value).strip().upper())
@@ -400,10 +446,50 @@ def load_tecan(src, measurement=None, **kw) -> pd.DataFrame:
         result.attrs["x_label"] = "time (s)"
         return result
 
+    scans = _tecan_plate_scans(raw)
+    scan = next(((label, header) for label, header in scans if label == selected), None)
+    if scan is not None:
+        label, header = scan
+        columns = [
+            (column, int(number))
+            for column, value in enumerate(raw.iloc[header, 1:], start=1)
+            if pd.notna(number := pd.to_numeric(value, errors="coerce"))
+            and float(number).is_integer()
+            and number > 0
+        ]
+        end = next(
+            (
+                row
+                for row in range(header + 1, len(raw))
+                if str(raw.iloc[row, 0]).strip().lower() == "end time:"
+            ),
+            len(raw),
+        )
+        rows = []
+        for row_index in range(header + 1, end):
+            row_label = str(raw.iloc[row_index, 0]).strip().upper()
+            if not re.fullmatch(r"[A-P]", row_label):
+                continue
+            for column, well_column in columns:
+                value = pd.to_numeric(raw.iloc[row_index, column], errors="coerce")
+                if pd.notna(value):
+                    rows.append(
+                        {
+                            "well": f"{row_label}{well_column}",
+                            "value": value,
+                            "measurement": label,
+                        }
+                    )
+        if not rows:
+            raise ValueError(f"No plate readings were found for Tecan measurement {label!r}.")
+        result = _finish(pd.DataFrame(rows))
+        result.attrs["x_label"] = "endpoint"
+        return result
+
     sections = _tecan_spectral_sections(raw)
     if not sections:
-        raise ValueError("Tecan report is missing a 'Time [s]' or 'Wavel.' measurement table.")
-    selected = measurement or sections[0][0]
+        raise ValueError("Tecan report is missing a supported kinetic, spectral, or plate-scan table.")
+    selected = selected or sections[0][0]
     section = next(((label, header) for label, header in sections if label == selected), None)
     if section is None:
         raise ValueError(f"Unknown Tecan measurement: {selected!r}")

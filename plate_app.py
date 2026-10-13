@@ -93,6 +93,7 @@ def _(mo, pl, resolve_file):
             "Kinetics": [name for name in _names if name == "Kinetic measurement"],
             "Absorbance": [name for name in _names if name.lower().startswith("abs")],
             "Emission": [name for name in _names if name.lower().startswith("em")],
+            "Plate scan": [name for name in _names if name.lower().startswith(("scan", "plate scan"))],
         }
         _summary = [
             f"{kind} ({', '.join(names)})"
@@ -135,6 +136,7 @@ def _(mo, pl, resolve_file):
             "Kinetics": [name for name in _names if name == "Kinetic measurement"],
             "Absorbance": [name for name in _names if name.lower().startswith("abs")],
             "Emission": [name for name in _names if name.lower().startswith("em")],
+            "Plate scan": [name for name in _names if name.lower().startswith(("scan", "plate scan"))],
         }
         _summary = [
             f"{kind} ({', '.join(names)})"
@@ -172,6 +174,8 @@ def _(group_path, group_sheet, home_path, home_sheet, mo, pl):
                 _kind = "Absorbance"
             elif _name.lower().startswith("em"):
                 _kind = "Emission"
+            elif _name.lower().startswith(("scan", "plate scan")):
+                _kind = "Plate scan"
             else:
                 _kind = "Data"
             _options[f"{_kind} — {_name}"] = _name
@@ -379,12 +383,32 @@ def _(get_groups, group_data, group_plate, home_data, home_plate, pl):
 
 @app.cell
 def _(group_data_choice, group_plate, group_sheet, home_data_choice, home_plate, home_sheet, mo):
-    plot_type = mo.ui.dropdown(["curves", "heatmap"], value="curves", label="Plot type")
+    _home_plot_default = (
+        "heatmap"
+        if home_data_choice.value
+        and home_data_choice.value.lower().startswith(("scan", "plate scan"))
+        else "curves"
+    )
+    plot_type = mo.ui.dropdown(
+        ["curves", "heatmap"],
+        value=_home_plot_default,
+        label="Plot type",
+    )
     home_plot_controls = mo.hstack(
         [home_sheet, home_data_choice, plot_type, home_plate],
         justify="start",
     )
-    group_plot_type = mo.ui.dropdown(["curves", "heatmap"], value="curves", label="Plot type")
+    _group_plot_default = (
+        "heatmap"
+        if group_data_choice.value
+        and group_data_choice.value.lower().startswith(("scan", "plate scan"))
+        else "curves"
+    )
+    group_plot_type = mo.ui.dropdown(
+        ["curves", "heatmap"],
+        value=_group_plot_default,
+        label="Plot type",
+    )
     group_trace_mode = mo.ui.dropdown(
         {
             "Average": "average",
