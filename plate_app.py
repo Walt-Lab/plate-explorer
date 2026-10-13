@@ -24,7 +24,7 @@ def _(mo):
     HOME = "Data overview"
     GROUPING = "Grouping-based spectra"
     MAPNOTES = "Grouping map & notes"
-    nav = mo.ui.tabs({MAPNOTES: mo.md(""), HOME: mo.md(""), GROUPING: mo.md("")})
+    nav = mo.ui.tabs({HOME: mo.md(""), MAPNOTES: mo.md(""), GROUPING: mo.md("")})
     mo.vstack([mo.md("# Plate explorer"), nav])
     return GROUPING, HOME, MAPNOTES, nav
 
@@ -32,7 +32,7 @@ def _(mo):
 @app.cell
 def _(GROUPING, HOME, MAPNOTES, nav):
     # Name of the page whose button is selected (falls back to the first tab).
-    page = nav.value if nav.value in (HOME, GROUPING, MAPNOTES) else MAPNOTES
+    page = nav.value if nav.value in (HOME, GROUPING, MAPNOTES) else HOME
     return (page,)
 
 
