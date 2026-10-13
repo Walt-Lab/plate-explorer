@@ -160,6 +160,24 @@ def assign_wells(groups: dict, name: str, wells: list[str], color: str | None = 
     return groups
 
 
+def update_group_wells(groups: dict, name: str, wells: list[str], action: str) -> dict:
+    """Add wells to or remove wells from an existing group."""
+    if name not in groups:
+        raise ValueError(f"Unknown group: {name!r}")
+    if action not in {"add", "remove"}:
+        raise ValueError("action must be 'add' or 'remove'.")
+    wells = list(dict.fromkeys(well_name(*parse_well(well)) for well in wells))
+    if not wells:
+        return groups
+    updated = {key: dict(info) for key, info in groups.items()}
+    group = updated[name]
+    current = list(group.get("wells", []))
+    if action == "remove":
+        group["wells"] = [well for well in current if well not in wells]
+        return updated
+    return assign_wells(updated, name, current + wells, group.get("color"))
+
+
 def remove_group(groups: dict, name: str) -> dict:
     return {k: v for k, v in groups.items() if k != name}
 

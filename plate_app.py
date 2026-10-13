@@ -243,7 +243,7 @@ def _(get_groups, mo, pl):
     # Name/colour boxes for the next group; they advance automatically after each "Add".
     _n = len(get_groups())
     _names = list(pl.COLOR_CHOICES)
-    group_name = mo.ui.text(value=f"Group {_n + 1}", label="Group name")
+    group_name = mo.ui.text(value=f"Group {_n + 1}", label="New group name")
     group_color = mo.ui.dropdown(pl.COLOR_CHOICES, value=_names[_n % len(_names)], label="Color")
     group_wells = mo.ui.text(value="", label="Wells (e.g. A1-A5)")
     return group_color, group_name, group_wells
@@ -345,18 +345,43 @@ def _(get_groups, group_color, group_name, group_wells, group_plate, mo, pl, pic
 
     def _add(_):
         _name = group_name.value.strip()
-        if _wells and _name:
+        if _wells and _name and _name not in get_groups():
             set_groups(lambda g: pl.assign_wells(g, _name, _wells, group_color.value))
 
-    _add_button = mo.ui.button(label="Add selected wells to group", kind="success", on_click=_add)
+    _add_button = mo.ui.button(label="Create group from selected wells", kind="success", on_click=_add)
     _clear_button = mo.ui.button(label="Clear all groups", on_click=lambda v: set_groups({}))
 
     _rows = []
     for _gname, _g in get_groups().items():
-        _rm = mo.ui.button(label="Remove", on_click=lambda v, n=_gname: set_groups(lambda g: pl.remove_group(g, n)))
+        _edit_action = mo.ui.dropdown(
+            {"Add selected wells": "add", "Remove selected wells": "remove"},
+            value="Add selected wells",
+            label="",
+        )
+        _edit_button = mo.ui.button(
+            label="Apply",
+            on_click=lambda v, n=_gname, a=_edit_action: (
+                set_groups(
+                    lambda g: pl.update_group_wells(
+                        g, n, _wells, a.value
+                    )
+                )
+                if _wells and not _well_error
+                else None
+            ),
+        )
+        _rm = mo.ui.button(
+            label="Delete group",
+            on_click=lambda v, n=_gname: set_groups(lambda g: pl.remove_group(g, n)),
+        )
         _rows.append(
             mo.hstack(
-                [mo.md(f"<span style='color:{_g['color']}'>&#9679;</span> **{_gname}**, {len(_g['wells'])} wells"), _rm],
+                [
+                    mo.md(f"<span style='color:{_g['color']}'>&#9679;</span> **{_gname}**, {len(_g['wells'])} wells"),
+                    _edit_action,
+                    _edit_button,
+                    _rm,
+                ],
                 justify="start",
                 align="center",
             )
@@ -364,6 +389,8 @@ def _(get_groups, group_color, group_name, group_wells, group_plate, mo, pl, pic
 
     group_ui = mo.vstack(
         [
+            mo.md("Select wells on the plate or enter coordinates, then add/remove them using the controls beside a group."),
+            mo.md("Use a new name to create a group; edit an existing group with its Add/Remove controls."),
             mo.md(f"**Invalid wells:** {_well_error}") if _well_error else mo.md(""),
             mo.hstack([group_name, group_wells, group_color, _add_button], justify="start", align="end"),
             *_rows,
