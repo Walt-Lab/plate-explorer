@@ -470,9 +470,9 @@ def _(df, get_groups, group_axis_label, group_data, group_data_error, group_plat
                         _b = _stats.iloc[_second]
                         _comparison_lines.append(
                             f"- **{_a['sample']} vs {_b['sample']}** — "
-                            f"difference in means = {_a['mean'] - _b['mean']:.3g}; "
-                            f"difference in medians = {_a['median'] - _b['median']:.3g}; "
-                            f"difference in standard deviations = {_a['std'] - _b['std']:.3g}"
+                            f"absolute difference in means = {abs(_a['mean'] - _b['mean']):.3g}; "
+                            f"absolute difference in medians = {abs(_a['median'] - _b['median']):.3g}; "
+                            f"absolute difference in standard deviations = {abs(_a['std'] - _b['std']):.3g}"
                         )
                 _stats_view = mo.md(
                     "### Curve summary\n\n"
