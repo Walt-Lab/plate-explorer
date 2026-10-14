@@ -541,7 +541,7 @@ def _(
             else:
                 _keyword_status = mo.md(
                     f"Found map-note match(es) for {', '.join(_matched_keywords)}. "
-                    "Select **Add matching groups** to add them to the graph."
+                    "Select **create group by keyword** to add them to the graph."
                 )
     elif group_note_search.value.strip():
         _keyword_status = mo.md("No map-group notes match those keywords.")
