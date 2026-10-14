@@ -248,19 +248,76 @@ def _(get_groups, mo, pl):
     # Name/colour boxes for the next group; they advance automatically after each "Add".
     _n = len(get_groups())
     _names = list(pl.COLOR_CHOICES)
-    group_name = mo.ui.text(value=f"Group {_n + 1}", label="New group name")
+    group_name = mo.ui.text(value=f"Group {_n + 1}", label="Group name")
     group_color = mo.ui.dropdown(pl.COLOR_CHOICES, value=_names[_n % len(_names)], label="Color")
     group_wells = mo.ui.text(value="", label="Wells (e.g. A1-A5)")
     return group_color, group_name, group_wells
 
 
 @app.cell
-def _(alt, get_groups, group_data, group_plate, mo, pl):
+def _(pl):
+    def groups_matching_note_keywords(groups, map_groups, notes, query):
+        keywords = []
+        seen_keywords = set()
+        for keyword in query.replace(";", ",").split(","):
+            keyword = keyword.strip()
+            folded = keyword.casefold()
+            if keyword and folded not in seen_keywords:
+                keywords.append(keyword)
+                seen_keywords.add(folded)
+        result = {
+            name: {**info, "wells": list(info.get("wells", []))}
+            for name, info in groups.items()
+        }
+        keyword_wells = set()
+        matched_keywords = []
+        for keyword in keywords:
+            _folded_keyword = keyword.casefold()
+            _matches = [
+                (name, info)
+                for name, info in map_groups.items()
+                if _folded_keyword in (notes.get(name) or "").casefold()
+            ]
+            if not _matches:
+                continue
+
+            matched_keywords.append(keyword)
+            wells = {
+                well
+                for _, info in _matches
+                for well in info.get("wells", [])
+            }
+            keyword_wells.update(wells)
+            _existing = result.get(keyword, {})
+            _color = _existing.get("color") or _matches[0][1].get("color")
+            result[keyword] = {
+                **_existing,
+                "wells": sorted(
+                    set(_existing.get("wells", [])) | wells,
+                    key=pl.parse_well,
+                ),
+                "color": _color,
+            }
+        return result, matched_keywords, keyword_wells
+
+    return (groups_matching_note_keywords,)
+
+
+@app.cell
+def _(alt, group_data, group_keyword_wells, group_plate, mo, plot_groups, pl):
     # The virtual plate. Click or drag over wells to select them.
     # Fill color = each well's signal (heatmap, from the loaded data).
     # Ring color = group assignment. Dimmed = not currently selected.
-    _groups = get_groups()
+    _groups = plot_groups
     _table = pl.plate_table(group_plate.value, _groups).copy()
+    _table["keyword_match"] = _table["well"].isin(group_keyword_wells)
+    _table["stroke_group"] = _table.apply(
+        lambda row: "Keyword match" if row["keyword_match"] else row["group"],
+        axis=1,
+    )
+    _table["keyword_stroke_width"] = _table["keyword_match"].map(
+        {True: 4, False: 1}
+    )
     _table["col"] = _table["col"].astype(int) + 1
     _table["row"] = _table["row"].astype(int) + 1
     _table["row_label"] = [chr(64 + int(r)) for r in _table["row"]]
@@ -276,7 +333,8 @@ def _(alt, get_groups, group_data, group_plate, mo, pl):
     _nr, _nc = pl.plate_shape(group_plate.value)
     _cell = 34 if _nr <= 8 else 26
     _size = 700 if _nr <= 8 else 400
-    _group_colors = _table.groupby("group", sort=False)["group_color"].first()
+    _stroke_colors = dict(zip(_table["group"], _table["group_color"]))
+    _stroke_colors["Keyword match"] = "#ffd54f"
     _selection = alt.selection_point(fields=["well"], empty="all")
     _chart = (
         alt.Chart(_table)
@@ -302,16 +360,18 @@ def _(alt, get_groups, group_data, group_plate, mo, pl):
                 legend=alt.Legend(title="Signal"),
             ),
             stroke=alt.Stroke(
-                "group:N",
+                "stroke_group:N",
                 scale=alt.Scale(
-                    domain=_group_colors.index.tolist(),
-                    range=_group_colors.tolist(),
+                    domain=list(_stroke_colors),
+                    range=list(_stroke_colors.values()),
                 ),
                 legend=alt.Legend(title="Group"),
             ),
-            strokeWidth=alt.condition(_selection, alt.value(3), alt.value(1)),
+            strokeWidth=alt.StrokeWidth(
+                "keyword_stroke_width:Q", scale=None, legend=None
+            ),
             opacity=alt.condition(_selection, alt.value(1.0), alt.value(0.35)),
-            tooltip=["well", "group", "value"],
+            tooltip=["well", "group", "value", "keyword_match"],
         )
         .add_params(_selection)
         .properties(width=_nc * _cell, height=_nr * _cell)
@@ -417,7 +477,19 @@ def _(get_groups, group_color, group_name, group_wells, group_plate, mo, pl, pic
 
 
 @app.cell
-def _(get_groups, group_data, group_plate, home_data, home_plate, pl):
+def _(
+    get_groups,
+    get_map,
+    group_data,
+    group_note_search,
+    group_plate,
+    groups_matching_note_keywords,
+    home_data,
+    home_plate,
+    mo,
+    notes_store,
+    pl,
+):
     # Two versions of the data, each joined to a well -> sample layout:
     #   layout_all / df_all : every well as one sample ("All wells")     -> Home page
     #   layout / df         : built from the groups you made             -> Grouping-based spectra
@@ -432,17 +504,83 @@ def _(get_groups, group_data, group_plate, home_data, home_plate, pl):
 
     layout_all = pl.layout_from_groups({"All wells": {"wells": pl.all_wells(home_plate.value)}}, home_plate.value)
     df_all = _attach(home_data, layout_all)
+    _matched_groups, _matched_keywords, _keyword_wells = groups_matching_note_keywords(
+        {}, get_map(), notes_store, group_note_search.value
+    )
+    _nr, _nc = pl.plate_shape(group_plate.value)
+    _out_of_range = []
+    for _name in _matched_keywords:
+        _valid_wells = []
+        for _well in _matched_groups[_name].get("wells", []):
+            _row, _column = pl.parse_well(_well)
+            if _row >= _nr or _column >= _nc:
+                _out_of_range.append(_well)
+            else:
+                _valid_wells.append(_well)
+        _matched_groups[_name]["wells"] = _valid_wells
     _groups = get_groups()
+    if _matched_keywords:
+        if _out_of_range:
+            _keyword_status = mo.md(
+                f"Found map-note match(es) for {', '.join(_matched_keywords)}. "
+                f"{len(set(_out_of_range))} well(s) are outside the selected "
+                f"{group_plate.value}-well plate and will be skipped when added."
+            )
+        else:
+            _already_added = all(
+                name in _groups
+                and set(_matched_groups[name].get("wells", [])).issubset(
+                    _groups[name].get("wells", [])
+                )
+                for name in _matched_keywords
+            )
+            if _already_added:
+                _keyword_status = mo.md(
+                    f"Keyword group(s) in the graph: {', '.join(_matched_keywords)}."
+                )
+            else:
+                _keyword_status = mo.md(
+                    f"Found map-note match(es) for {', '.join(_matched_keywords)}. "
+                    "Select **create group by keyword** to add them to the graph."
+                )
+    elif group_note_search.value.strip():
+        _keyword_status = mo.md("No map-group notes match those keywords.")
+    else:
+        _keyword_status = mo.md("")
+    group_keyword_status = _keyword_status
     layout = pl.layout_from_groups(_groups, group_plate.value) if _groups else pl.layout_from_groups(
         {"All wells": {"wells": pl.all_wells(group_plate.value)}},
         group_plate.value,
     )
     df = _attach(group_data, layout) if _groups else _pd.DataFrame()
-    return df, df_all, layout, layout_all
+    plot_groups = _groups
+    group_keyword_wells = _keyword_wells - set(_out_of_range)
+    return (
+        df,
+        df_all,
+        group_keyword_status,
+        group_keyword_wells,
+        layout,
+        layout_all,
+        plot_groups,
+    )
 
 
 @app.cell
-def _(group_data_choice, group_plate, group_sheet, home_data_choice, home_plate, home_sheet, mo):
+def _(
+    get_map,
+    group_data_choice,
+    group_plate,
+    group_sheet,
+    groups_matching_note_keywords,
+    home_data_choice,
+    home_plate,
+    home_sheet,
+    mo,
+    notes_store,
+    pl,
+    set_groups,
+):
     _home_plot_default = (
         "heatmap"
         if home_data_choice.value
@@ -478,11 +616,55 @@ def _(group_data_choice, group_plate, group_sheet, home_data_choice, home_plate,
         value="Average",
         label="Trace display (curves)",
     )
+    group_note_search = mo.ui.text(
+        value="",
+        label="Add map groups by note keywords",
+        placeholder="Enter keywords, separated by commas",
+        full_width=True,
+    )
+
+    def _add_keyword_groups(_):
+        _matched_groups, _matched_keywords, _ = groups_matching_note_keywords(
+            {}, get_map(), notes_store, group_note_search.value
+        )
+        _nr, _nc = pl.plate_shape(group_plate.value)
+        _valid_groups = {}
+        for _name in _matched_keywords:
+            _wells = []
+            for _well in _matched_groups[_name].get("wells", []):
+                _row, _column = pl.parse_well(_well)
+                if _row < _nr and _column < _nc:
+                    _wells.append(_well)
+            if _wells:
+                _valid_groups[_name] = (_wells, _matched_groups[_name].get("color"))
+        if _valid_groups:
+            def _update_groups(_groups):
+                for _name, (_wells, _color) in _valid_groups.items():
+                    _color = _groups.get(_name, {}).get("color") or _color
+                    _groups = pl.assign_wells(_groups, _name, _wells, _color)
+                return _groups
+
+            set_groups(_update_groups)
+
+    group_note_add_button = mo.ui.button(
+        label="Create group by keyword",
+        kind="success",
+        on_click=_add_keyword_groups,
+    )
+    group_note_controls = mo.vstack([group_note_search, group_note_add_button])
     group_plot_controls = mo.hstack(
         [group_sheet, group_data_choice, group_plot_type, group_trace_mode, group_plate],
         justify="start",
     )
-    return group_plot_controls, group_plot_type, group_trace_mode, home_plot_controls, plot_type
+    return (
+        group_note_controls,
+        group_note_search,
+        group_plot_controls,
+        group_plot_type,
+        group_trace_mode,
+        home_plot_controls,
+        plot_type,
+    )
 
 
 @app.cell
@@ -515,14 +697,14 @@ def _(df_all, home_axis_label, home_data, home_data_error, home_plate, mo, pl, p
 
 
 @app.cell
-def _(df, get_groups, group_axis_label, group_data, group_data_error, group_plate, group_plot_type, group_trace_mode, mo, pl):
+def _(df, group_axis_label, group_data, group_data_error, group_plot_type, group_trace_mode, mo, plot_groups, pl):
     # Grouping-based spectra plot: one trace per group you made, in the group's color.
     group_fig = None
     if group_data_error:
         group_plot = mo.md(f"**Couldn't read that file:** {group_data_error}")
     elif group_data is None:
         group_plot = mo.md("Choose a data series to see grouped plots.")
-    elif not get_groups():
+    elif not plot_groups:
         group_plot = mo.md("")
     elif df.empty:
         group_plot = mo.md("None of the grouped wells appear in this data file.")
@@ -537,7 +719,7 @@ def _(df, get_groups, group_axis_label, group_data, group_data_error, group_plat
                 time=None,
                 n_wells=group_plate.value,
                 xlabel=group_axis_label,
-                colors={name: g["color"] for name, g in get_groups().items()},
+                colors={name: g["color"] for name, g in plot_groups.items()},
                 trace_mode=group_trace_mode.value,
             )
             _stats_data = pl.endpoint(df) if group_plot_type.value == "heatmap" else df
@@ -782,10 +964,9 @@ def _(alt, get_map, home_plate, map_note_search, mo, notes_store, pl):
         _coordinate_output = mo.md("No matching wells to list.")
     else:
         _coordinate_output = mo.md("")
-    map_picker_view = mo.vstack(
-        [map_note_search, _match_status, _coordinate_output, map_picker]
-    )
-    return map_picker, map_picker_view
+    map_picker_view = map_picker
+    map_note_search_view = mo.vstack([map_note_search, _match_status, _coordinate_output])
+    return map_note_search_view, map_picker, map_picker_view
 
 
 @app.cell
@@ -1052,6 +1233,18 @@ def _(GROUPING, mo, page, picker_view):
 
 
 @app.cell
+def _(GROUPING, group_note_controls, mo, page):
+    group_note_controls if page == GROUPING else mo.md("")
+    return
+
+
+@app.cell
+def _(GROUPING, group_keyword_status, mo, page):
+    group_keyword_status if page == GROUPING else mo.md("")
+    return
+
+
+@app.cell
 def _(GROUPING, group_ui, mo, page):
     group_ui if page == GROUPING else mo.md("")
     return
@@ -1066,6 +1259,12 @@ def _(GROUPING, group_plot, mo, page):
 @app.cell
 def _(MAPNOTES, map_picker_view, mo, page):
     map_picker_view if page == MAPNOTES else mo.md("")
+    return
+
+
+@app.cell
+def _(MAPNOTES, map_note_search_view, mo, page):
+    map_note_search_view if page == MAPNOTES else mo.md("")
     return
 
 

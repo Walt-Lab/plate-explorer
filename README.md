@@ -11,6 +11,9 @@ Upload one CSV/Excel file on the Home page. Its filename is shown on both the Ho
 The Tecan workbook importer detects kinetics, wavelength scans, and endpoint plate scans from their table structure. Endpoint plate scans default to a heatmap; kinetic and wavelength-scan data default to curves. Other vendor/export layouts may need additional format support.
 The Grouping-based spectra view shows a compact mean, median, and standard deviation summary for each group, with absolute pairwise differences when multiple groups are present. Heatmap summaries use the same endpoint measurement shown in the heatmap.
 On the Grouping-based spectra page, select wells on the plate or enter well coordinates, then use each group's Add/Remove control to edit its membership. A well can belong to multiple groups; adding it to a group does not remove it from other groups. Overlapping groups are shown with blended colors on the plate and analyzed independently in the curves.
+Grouping map & notes offers 20 named group colors and case-insensitive note keyword highlighting. In Grouping-based spectra, enter comma-separated keywords below the plate chart and select **Add matching groups** to save each matching keyword as its own group in the graph.
+If groups contain coordinates outside the currently selected plate size, the app reports which wells do not fit and suggests choosing a larger plate or editing the groups.
+Each tab has its own versioned YAML import/export controls. Home exports its selected sheet, measurement, plot type, and plate size; Grouping-based spectra also exports overlapping groups and trace mode; Grouping map & notes exports its groups, colors, memberships, and notes. Importing replaces only that tab's setup. YAML stores data selections as references, not workbook contents, so upload the corresponding data file separately.
 
 ## Plate layout
 One sample per line, `Name: wells`. Ranges are rectangles; combine with commas.
