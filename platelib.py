@@ -14,14 +14,18 @@ from __future__ import annotations
 
 import re
 import string
+import textwrap
 from pathlib import Path
 
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+import yaml
 from matplotlib.colors import to_rgb
+from matplotlib.ticker import MaxNLocator
 
 PLATE_SHAPES = {6: (2, 3), 12: (3, 4), 24: (4, 6), 48: (6, 8), 96: (8, 12), 384: (16, 24)}
+PLOT_FIGSIZE = (5, 3.2)
 PLOT_TYPES = ["curves", "bar", "box", "heatmap"]
 PALETTE = [
     "#1f77b4",
@@ -47,8 +51,32 @@ COLOR_CHOICES = {
     "Gray": "#7f7f7f",
     "Olive": "#bcbd22",
     "Teal": "#17becf",
+    "Navy": "#332288",
+    "Sky blue": "#56b4e9",
+    "Mint": "#66c2a5",
+    "Forest green": "#228833",
+    "Lime": "#a6d854",
+    "Gold": "#e6ab02",
+    "Vermilion": "#d55e00",
+    "Rose": "#cc79a7",
+    "Magenta": "#aa3377",
+    "Slate": "#667085",
 }
 _WELL_RE = re.compile(r"^([A-Za-z])0*(\d+)$")
+SETUP_FORMAT = "plate-explorer-setup"
+SETUP_VERSION = 1
+SETUP_SECTIONS = {
+    "home": {"plate_size", "sheet", "measurement", "plot_type"},
+    "group_spectra": {
+        "plate_size",
+        "sheet",
+        "measurement",
+        "plot_type",
+        "trace_mode",
+        "groups",
+    },
+    "group_map": {"plate_size", "groups"},
+}
 
 
 # --------------------------------------------------------------------------- wells
@@ -61,7 +89,10 @@ def parse_well(well: str) -> tuple[int, int]:
     m = _WELL_RE.match(str(well).strip())
     if not m:
         raise ValueError(f"Bad well name: {well!r}")
-    return string.ascii_uppercase.index(m.group(1).upper()), int(m.group(2)) - 1
+    col = int(m.group(2))
+    if col < 1:
+        raise ValueError(f"Well column must be at least 1: {well!r}")
+    return string.ascii_uppercase.index(m.group(1).upper()), col - 1
 
 
 def well_name(row: int, col: int) -> str:
@@ -71,6 +102,121 @@ def well_name(row: int, col: int) -> str:
 def all_wells(n_wells: int = 96) -> list[str]:
     nr, nc = plate_shape(n_wells)
     return [well_name(r, c) for r in range(nr) for c in range(nc)]
+
+
+def dump_setup_yaml(section: str, payload: dict) -> str:
+    """Serialize one tab's settings to a versioned YAML document."""
+    if section not in SETUP_SECTIONS:
+        raise ValueError(f"Unknown setup section: {section!r}")
+    return yaml.safe_dump(
+        {
+            "format": SETUP_FORMAT,
+            "version": SETUP_VERSION,
+            "section": section,
+            **payload,
+        },
+        sort_keys=False,
+        allow_unicode=True,
+    )
+
+
+def load_setup_yaml(contents: bytes | str, expected_section: str) -> dict:
+    """Parse and validate a YAML setup export for a specific app tab."""
+    if expected_section not in SETUP_SECTIONS:
+        raise ValueError(f"Unknown setup section: {expected_section!r}")
+    try:
+        text = contents.decode("utf-8-sig") if isinstance(contents, bytes) else contents
+        document = yaml.safe_load(text)
+    except (UnicodeDecodeError, yaml.YAMLError) as exc:
+        raise ValueError(f"Couldn't read the YAML file: {exc}") from exc
+    if not isinstance(document, dict):
+        raise ValueError("The YAML document must contain a mapping.")
+    if document.get("format") != SETUP_FORMAT:
+        raise ValueError("This is not a Plate Explorer setup YAML file.")
+    version = document.get("version")
+    if isinstance(version, bool) or version != SETUP_VERSION:
+        raise ValueError(f"Unsupported setup version: {version!r}.")
+    if document.get("section") != expected_section:
+        raise ValueError(
+            f"This file is for the {document.get('section')!r} tab, "
+            f"not {expected_section!r}."
+        )
+
+    allowed = SETUP_SECTIONS[expected_section] | {"format", "version", "section"}
+    extra = set(document) - allowed
+    missing = SETUP_SECTIONS[expected_section] - set(document)
+    if extra:
+        raise ValueError(f"Unexpected setup fields: {', '.join(sorted(extra))}.")
+    if missing:
+        raise ValueError(f"Missing setup fields: {', '.join(sorted(missing))}.")
+
+    plate_size = document["plate_size"]
+    if isinstance(plate_size, bool) or not isinstance(plate_size, int):
+        raise ValueError("'plate_size' must be an integer.")
+    if plate_size not in {96, 384}:
+        raise ValueError(f"Unsupported plate size: {plate_size!r}.")
+
+    if expected_section in {"home", "group_spectra"}:
+        for key in ("sheet", "measurement"):
+            if document[key] is not None and not isinstance(document[key], str):
+                raise ValueError(f"'{key}' must be text or null.")
+        if document["plot_type"] not in {"curves", "heatmap"}:
+            raise ValueError("'plot_type' must be 'curves' or 'heatmap'.")
+    if expected_section == "group_spectra" and document["trace_mode"] not in {
+        "average",
+        "individual",
+        "both",
+    }:
+        raise ValueError("'trace_mode' must be 'average', 'individual', or 'both'.")
+
+    groups = document["groups"] if expected_section != "home" else None
+    if groups is not None:
+        if not isinstance(groups, list):
+            raise ValueError("'groups' must be a list.")
+        seen_names = set()
+        validated_groups = []
+        for entry in groups:
+            if not isinstance(entry, dict):
+                raise ValueError("Each group must be a mapping.")
+            required = {"name", "wells", "color"}
+            if expected_section == "group_map":
+                required.add("notes")
+            if set(entry) != required:
+                raise ValueError(
+                    f"Each group must have exactly these fields: {', '.join(sorted(required))}."
+                )
+            name = entry["name"]
+            if not isinstance(name, str) or not name.strip():
+                raise ValueError("Group names must be non-empty text.")
+            name = name.strip()
+            if name in seen_names:
+                raise ValueError(f"Duplicate group name: {name!r}.")
+            seen_names.add(name)
+            wells = entry["wells"]
+            if not isinstance(wells, list) or not all(isinstance(well, str) for well in wells):
+                raise ValueError(f"The wells for group {name!r} must be a list of coordinates.")
+            normalized_wells = list(
+                dict.fromkeys(well_name(*parse_well(well)) for well in wells)
+            )
+            nr, nc = plate_shape(plate_size)
+            for well in normalized_wells:
+                row, col = parse_well(well)
+                if row >= nr or col >= nc:
+                    raise ValueError(
+                        f"Well {well} in group {name!r} is outside a {plate_size}-well plate."
+                    )
+            color = entry["color"]
+            if not isinstance(color, str) or not re.fullmatch(r"#[0-9a-fA-F]{6}", color):
+                raise ValueError(f"Group {name!r} color must be a six-digit hex color.")
+            validated = {"name": name, "wells": normalized_wells, "color": color}
+            if expected_section == "group_map":
+                notes = entry["notes"]
+                if not isinstance(notes, str):
+                    raise ValueError(f"Notes for group {name!r} must be text.")
+                validated["notes"] = notes
+            validated_groups.append(validated)
+        document["groups"] = validated_groups
+    return {key: value for key, value in document.items() if key not in {"format", "version", "section"}}
 
 
 def expand_wells(spec: str, n_wells: int = 96) -> list[str]:
@@ -205,9 +351,12 @@ def apply_group_edits(groups: dict, edits: list) -> dict:
 def layout_from_groups(groups: dict, n_wells: int = 96) -> pd.DataFrame:
     """Convert selected groups into a layout DataFrame compatible with `attach_layout`."""
     rows = []
+    nr, nc = plate_shape(n_wells)
     for name, info in groups.items():
         for well in info.get("wells", []):
             row, col = parse_well(well)
+            if row >= nr or col >= nc:
+                raise ValueError(f"Well {well} is outside a {n_wells}-well plate.")
             rows.append({"well": well, "row": row, "col": col, "sample": name})
     if not rows:
         return pd.DataFrame(columns=["well", "row", "col", "sample", "replicate"])
@@ -648,16 +797,75 @@ def summarize_curves(df: pd.DataFrame) -> pd.DataFrame:
 
 
 # --------------------------------------------------------------------------- plots
+def _polish_axes(ax):
+    ax.set_facecolor("#ffffff")
+    ax.set_axisbelow(True)
+    ax.grid(axis="y", color="#e7efeb", linewidth=0.8)
+    ax.tick_params(colors="#526a62", labelsize=9, length=0, pad=6)
+    ax.xaxis.label.set_color("#38534a")
+    ax.yaxis.label.set_color("#38534a")
+    ax.xaxis.label.set_fontsize(10)
+    ax.yaxis.label.set_fontsize(10)
+    for side in ("top", "right"):
+        ax.spines[side].set_visible(False)
+    for side in ("left", "bottom"):
+        ax.spines[side].set_color("#d8e3de")
+        ax.spines[side].set_linewidth(0.8)
+
+
+def _set_category_ticks(ax, positions, samples):
+    count = len(samples)
+    wrap_width = 14 if count <= 4 else 8 if count <= 8 else 6
+    fontsize = 8 if count <= 4 else 7 if count <= 8 else 6
+    labels = [
+        textwrap.fill(str(sample), width=wrap_width, break_long_words=True)
+        for sample in samples
+    ]
+    ax.set_xticks(
+        positions,
+        labels,
+        rotation=0,
+        ha="center",
+        fontsize=fontsize,
+    )
+
+
 def plot_plate_heatmap(df, n_wells=96, time=None, cmap="viridis"):
     d = endpoint(df, time)
     nr, nc = plate_shape(n_wells)
     grid = np.full((nr, nc), np.nan)
     grid[d["row"].to_numpy(), d["col"].to_numpy()] = d["value"].to_numpy()
-    fig, ax = plt.subplots(figsize=(1 + nc * 0.55, 1 + nr * 0.55))
+    fig, ax = plt.subplots(figsize=PLOT_FIGSIZE)
+    fig.patch.set_facecolor("#ffffff")
     im = ax.imshow(grid, cmap=cmap)
     ax.set_xticks(range(nc), labels=[str(i + 1) for i in range(nc)])
     ax.set_yticks(range(nr), labels=list(string.ascii_uppercase[:nr]))
-    fig.colorbar(im, ax=ax, label="value")
+    ax.xaxis.tick_top()
+    ax.tick_params(
+        axis="x",
+        top=True,
+        labeltop=True,
+        bottom=False,
+        labelbottom=False,
+        colors="#526a62",
+        labelsize=9 if nc <= 12 else 7,
+        labelrotation=0,
+        length=0,
+        pad=4,
+    )
+    ax.set_aspect("equal")
+    ax.tick_params(axis="y", colors="#526a62", labelsize=8 if nr > 8 else 9, length=0, pad=4)
+    ax.set_xticks(np.arange(-0.5, nc, 1), minor=True)
+    ax.set_yticks(np.arange(-0.5, nr, 1), minor=True)
+    ax.grid(which="minor", color="#ffffff", linewidth=1.2)
+    ax.tick_params(which="minor", bottom=False, left=False)
+    for spine in ax.spines.values():
+        spine.set_visible(False)
+    colorbar = fig.colorbar(im, ax=ax, label="Signal", fraction=0.045, pad=0.04)
+    colorbar.outline.set_visible(False)
+    colorbar.ax.yaxis.label.set_color("#38534a")
+    colorbar.ax.tick_params(colors="#526a62", labelsize=8, length=0)
+    fig.tight_layout()
     return fig
 
 
@@ -672,7 +880,9 @@ def plot_curves(df, facet=False, ncols=3, err="sd", xlabel="time", colors=None, 
     if facet:
         nc = min(ncols, len(samples))
         nr = -(-len(samples) // nc)
-        fig, axes = plt.subplots(nr, nc, figsize=(4 * nc, 3 * nr), sharex=True, sharey=True, squeeze=False)
+        fig, axes = plt.subplots(
+            nr, nc, figsize=PLOT_FIGSIZE, sharex=True, sharey=True, squeeze=False
+        )
         for ax, s in zip(axes.flat, samples):
             for _, w in df[df["sample"] == s].groupby("well"):
                 ax.plot(w["time"], w["value"], color="gray", alpha=0.4, lw=0.8)
@@ -682,7 +892,10 @@ def plot_curves(df, facet=False, ncols=3, err="sd", xlabel="time", colors=None, 
         for ax in list(axes.flat)[len(samples):]:
             ax.axis("off")
     else:
-        fig, ax = plt.subplots(figsize=(7, 4.5))
+        fig, ax = plt.subplots(figsize=PLOT_FIGSIZE)
+        fig.patch.set_facecolor("#ffffff")
+        _polish_axes(ax)
+        ax.xaxis.set_major_locator(MaxNLocator(nbins=6, min_n_ticks=3))
         cycle_colors = plt.rcParams["axes.prop_cycle"].by_key()["color"]
         for sample_index, s in enumerate(samples):
             st = stats[stats["sample"] == s]
@@ -693,7 +906,7 @@ def plot_curves(df, facet=False, ncols=3, err="sd", xlabel="time", colors=None, 
                 (line,) = ax.plot(x, mean, lw=2.5, label=s, color=color, zorder=4)
             if err and trace_mode != "individual":
                 band = pd.to_numeric(st[err], errors="coerce").fillna(0).to_numpy(dtype=float)
-                ax.fill_between(x, mean - band, mean + band, color=line.get_color(), alpha=0.2)
+                ax.fill_between(x, mean - band, mean + band, color=line.get_color(), alpha=0.13)
             if trace_mode != "average":
                 rgb = to_rgb(color)
                 wells = list(df.loc[df["sample"] == s, "well"].drop_duplicates().sort_values())
@@ -717,8 +930,8 @@ def plot_curves(df, facet=False, ncols=3, err="sd", xlabel="time", colors=None, 
                         zorder=2,
                     )
         ax.set_xlabel(xlabel)
-        ax.set_ylabel("value")
-        ax.legend()
+        ax.set_ylabel("Signal")
+        ax.legend(frameon=False, fontsize=9, labelspacing=0.5)
     fig.tight_layout()
     return fig
 
@@ -728,7 +941,9 @@ def plot_bars(df, time=None, colors=None):
     samples = list(d["sample"].unique())
     colors = colors or {}
     st = summarize(d, by=("sample",)).set_index("sample").loc[samples]
-    fig, ax = plt.subplots(figsize=(1.2 * len(samples) + 2, 4))
+    fig, ax = plt.subplots(figsize=PLOT_FIGSIZE)
+    fig.patch.set_facecolor("#ffffff")
+    _polish_axes(ax)
     x = np.arange(len(samples))
     for i, s in enumerate(samples):
         error = st.loc[s, "sd"]
@@ -736,9 +951,17 @@ def plot_bars(df, time=None, colors=None):
     rng = np.random.default_rng(0)
     for i, s in enumerate(samples):
         v = d.loc[d["sample"] == s, "value"]
-        ax.scatter(i + rng.uniform(-0.12, 0.12, len(v)), v, color="k", s=14, zorder=3)
-    ax.set_xticks(x, samples, rotation=30, ha="right")
-    ax.set_ylabel("value")
+        ax.scatter(
+            i + rng.uniform(-0.12, 0.12, len(v)),
+            v,
+            color="#263f36",
+            edgecolors="#ffffff",
+            linewidths=0.45,
+            s=22,
+            zorder=3,
+        )
+    _set_category_ticks(ax, x, samples)
+    ax.set_ylabel("Signal")
     fig.tight_layout()
     return fig
 
@@ -747,12 +970,14 @@ def plot_box(df, time=None, colors=None):
     d = endpoint(df, time)
     samples = list(d["sample"].unique())
     colors = colors or {}
-    fig, ax = plt.subplots(figsize=(1.2 * len(samples) + 2, 4))
+    fig, ax = plt.subplots(figsize=PLOT_FIGSIZE)
+    fig.patch.set_facecolor("#ffffff")
+    _polish_axes(ax)
     bp = ax.boxplot([d.loc[d["sample"] == s, "value"] for s in samples], patch_artist=True)
     for patch, s in zip(bp["boxes"], samples):
         patch.set_facecolor(colors.get(s, patch.get_facecolor()))
-    ax.set_xticks(range(1, len(samples) + 1), samples, rotation=30, ha="right")
-    ax.set_ylabel("value")
+    _set_category_ticks(ax, range(1, len(samples) + 1), samples)
+    ax.set_ylabel("Signal")
     fig.tight_layout()
     return fig
 
